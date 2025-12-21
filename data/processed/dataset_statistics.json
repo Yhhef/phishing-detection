@@ -1,0 +1,23 @@
+{
+  "build_time": "2025-12-21T20:51:55.090422",
+  "full_dataset": {
+    "total": 10000,
+    "phishing": 5000,
+    "normal": 5000,
+    "ratio": "5000:5000"
+  },
+  "train_set": {
+    "total": 8000,
+    "phishing": 4000,
+    "normal": 4000
+  },
+  "test_set": {
+    "total": 2000,
+    "phishing": 1000,
+    "normal": 1000
+  },
+  "sources": {
+    "tranco": 5000,
+    "phishtank": 5000
+  }
+}
