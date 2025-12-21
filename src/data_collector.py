@@ -327,6 +327,14 @@ class TrancoCollector:
     # Tranco数据下载URL（CSV格式，zip压缩）
     DOWNLOAD_URL = "https://tranco-list.eu/top-1m.csv.zip"
 
+    # 需要排除的域名（短链接服务等可能被滥用）
+    EXCLUDE_DOMAINS = {
+        'bit.ly', 'goo.gl', 't.co', 'tinyurl.com', 'ow.ly',
+        'is.gd', 'buff.ly', 'adf.ly', 'bit.do', 'shorte.st',
+        'bc.vc', 'j.mp', 'v.gd', 'ity.im', 'q.gs', 'po.st',
+        'cutt.ly', 'rb.gy', 'shorturl.at'
+    }
+
     def __init__(self, output_dir=None):
         """
         初始化采集器
@@ -428,6 +436,10 @@ class TrancoCollector:
             if len(domain) < 3:
                 continue
             if '.' not in domain:
+                continue
+
+            # 跳过可能被滥用的域名（短链接服务等）
+            if domain in self.EXCLUDE_DOMAINS:
                 continue
 
             # 去重
