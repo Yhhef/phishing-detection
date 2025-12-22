@@ -17,6 +17,7 @@ import numpy as np
 from urllib.parse import urlparse
 from typing import Dict, List, Union, Optional
 import logging
+import tldextract
 
 import sys
 import os
@@ -169,6 +170,134 @@ class URLFeatureExtractor:
         """
         return sum(c.isdigit() for c in self.url)
 
+    # ==================== 高级特征 (9维) ====================
+
+    def has_ip_address(self) -> int:
+        """
+        检测URL中是否包含IP地址
+
+        使用IP地址而非域名是钓鱼网站的常见特征，
+        因为这样可以绕过域名黑名单检测。
+
+        Returns:
+            int: 1表示包含IP地址，0表示不包含
+        """
+        pattern = r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}'
+        return 1 if re.search(pattern, self.url) else 0
+
+    def has_at_symbol(self) -> int:
+        """
+        检测URL中是否包含@符号
+
+        @符号在URL中可用于混淆用户，
+        例如: http://trusted.com@evil.com 实际访问的是evil.com
+
+        Returns:
+            int: 1表示包含@符号，0表示不包含
+        """
+        return 1 if '@' in self.url else 0
+
+    def num_subdomains(self) -> int:
+        """
+        统计子域名数量
+
+        钓鱼网站常使用多级子域名来伪装，
+        例如: www.paypal.com.evil.site
+
+        Returns:
+            int: 子域名的数量
+        """
+        try:
+            extracted = tldextract.extract(self.url)
+            subdomain = extracted.subdomain
+            if not subdomain:
+                return 0
+            return subdomain.count('.') + 1
+        except Exception:
+            return 0
+
+    def has_https(self) -> int:
+        """
+        检测是否使用HTTPS协议
+
+        虽然HTTPS不能保证网站安全，但缺少HTTPS是可疑特征。
+        现代合法网站通常都使用HTTPS。
+
+        Returns:
+            int: 1表示使用HTTPS，0表示不使用
+        """
+        return 1 if self.parsed.scheme == 'https' else 0
+
+    def path_depth(self) -> int:
+        """
+        计算URL路径深度
+
+        过深的路径层级可能表示复杂的重定向或伪装路径。
+
+        Returns:
+            int: 路径的深度（目录层级数）
+        """
+        path = self.parsed.path
+        if not path or path == '/':
+            return 0
+        # 去除首尾斜杠后计算层级
+        return path.strip('/').count('/') + 1
+
+    def has_port(self) -> int:
+        """
+        检测是否显式指定端口号
+
+        非标准端口（非80/443）可能是可疑特征。
+
+        Returns:
+            int: 1表示指定了端口，0表示未指定
+        """
+        return 1 if self.parsed.port else 0
+
+    def entropy(self) -> float:
+        """
+        计算URL的信息熵
+
+        信息熵衡量URL中字符的随机性。
+        钓鱼URL常包含随机字符串，导致熵值较高。
+
+        计算公式: H = -Σ(p × log2(p))
+
+        Returns:
+            float: URL的信息熵值
+        """
+        if not self.url:
+            return 0.0
+        # 计算每个字符的出现概率
+        prob = [self.url.count(c) / len(self.url) for c in set(self.url)]
+        # 应用信息熵公式
+        return -sum(p * np.log2(p) for p in prob if p > 0)
+
+    def is_shortening_service(self) -> int:
+        """
+        检测是否使用短链接服务
+
+        短链接服务（如bit.ly、tinyurl等）常被用于隐藏真实URL，
+        是钓鱼攻击的常用手段。
+
+        Returns:
+            int: 1表示是短链接，0表示不是
+        """
+        return 1 if any(s in self.domain for s in self.SHORTENING_SERVICES) else 0
+
+    def has_suspicious_words(self) -> int:
+        """
+        检测URL中是否包含可疑关键词
+
+        钓鱼URL常包含品牌名称或诱导性词汇，
+        如: login, verify, secure, paypal等
+
+        Returns:
+            int: 1表示包含可疑词，0表示不包含
+        """
+        url_lower = self.url.lower()
+        return 1 if any(w in url_lower for w in self.SUSPICIOUS_WORDS) else 0
+
     # ==================== 基础特征提取方法 ====================
 
     def extract_basic_features(self) -> Dict[str, int]:
@@ -194,6 +323,49 @@ class URLFeatureExtractor:
             'num_digits': self.num_digits()
         }
 
+    def extract_all_url_features(self) -> Dict[str, Union[int, float]]:
+        """
+        提取全部17个URL词法特征
+
+        包括：
+        - 基础特征 (8维): 长度和字符统计
+        - 高级特征 (9维): 语义和结构分析
+
+        Returns:
+            dict: 包含17个特征的字典
+        """
+        return {
+            # 基础特征 (8维)
+            'url_length': self.url_length(),
+            'domain_length': self.domain_length(),
+            'path_length': self.path_length(),
+            'num_dots': self.num_dots(),
+            'num_hyphens': self.num_hyphens(),
+            'num_underscores': self.num_underscores(),
+            'num_slashes': self.num_slashes(),
+            'num_digits': self.num_digits(),
+            # 高级特征 (9维)
+            'has_ip': self.has_ip_address(),
+            'has_at': self.has_at_symbol(),
+            'num_subdomains': self.num_subdomains(),
+            'has_https': self.has_https(),
+            'path_depth': self.path_depth(),
+            'has_port': self.has_port(),
+            'entropy': self.entropy(),
+            'is_shortening': self.is_shortening_service(),
+            'has_suspicious': self.has_suspicious_words()
+        }
+
+    def extract_all_url_features_array(self) -> np.ndarray:
+        """
+        以numpy数组格式返回全部17个URL特征
+
+        Returns:
+            ndarray: 包含17个特征值的一维数组
+        """
+        features = self.extract_all_url_features()
+        return np.array(list(features.values()))
+
     def extract_basic_features_array(self) -> np.ndarray:
         """
         以numpy数组格式返回基础特征
@@ -209,7 +381,7 @@ class URLFeatureExtractor:
 
 def extract_url_basic_features(url: str) -> Dict[str, int]:
     """
-    便捷函数：提取单个URL的基础特征
+    便捷函数：提取单个URL的基础特征（8维）
 
     Args:
         url: URL字符串
@@ -221,9 +393,23 @@ def extract_url_basic_features(url: str) -> Dict[str, int]:
     return extractor.extract_basic_features()
 
 
+def extract_url_all_features(url: str) -> Dict[str, Union[int, float]]:
+    """
+    便捷函数：提取单个URL的全部特征（17维）
+
+    Args:
+        url: URL字符串
+
+    Returns:
+        dict: 特征字典
+    """
+    extractor = URLFeatureExtractor(url)
+    return extractor.extract_all_url_features()
+
+
 def batch_extract_basic_features(urls: List[str]) -> List[Dict[str, int]]:
     """
-    批量提取URL基础特征
+    批量提取URL基础特征（8维）
 
     Args:
         urls: URL列表
@@ -249,6 +435,47 @@ def batch_extract_basic_features(urls: List[str]) -> List[Dict[str, int]]:
                 'num_underscores': 0,
                 'num_slashes': 0,
                 'num_digits': 0
+            })
+    return results
+
+
+def batch_extract_all_features(urls: List[str]) -> List[Dict[str, Union[int, float]]]:
+    """
+    批量提取URL全部特征（17维）
+
+    Args:
+        urls: URL列表
+
+    Returns:
+        list: 特征字典列表
+    """
+    from tqdm import tqdm
+    results = []
+    for url in tqdm(urls, desc="提取全部URL特征"):
+        try:
+            features = extract_url_all_features(url)
+            results.append(features)
+        except Exception as e:
+            logger.warning(f"特征提取失败 {url}: {e}")
+            # 返回默认值（17维）
+            results.append({
+                'url_length': len(url) if url else 0,
+                'domain_length': 0,
+                'path_length': 0,
+                'num_dots': 0,
+                'num_hyphens': 0,
+                'num_underscores': 0,
+                'num_slashes': 0,
+                'num_digits': 0,
+                'has_ip': 0,
+                'has_at': 0,
+                'num_subdomains': 0,
+                'has_https': 0,
+                'path_depth': 0,
+                'has_port': 0,
+                'entropy': 0.0,
+                'is_shortening': 0,
+                'has_suspicious': 0
             })
     return results
 
@@ -288,12 +515,25 @@ if __name__ == '__main__':
         "http://bit.ly/abc123"
     ]
 
-    print("URL特征提取测试")
+    print("URL特征提取测试 - 全部17维特征")
     print("=" * 60)
 
     for url in test_urls:
         print(f"\nURL: {url}")
         extractor = URLFeatureExtractor(url)
-        features = extractor.extract_basic_features()
+        features = extractor.extract_all_url_features()
+        print(f"特征数量: {len(features)}")
         for name, value in features.items():
             print(f"  {name}: {value}")
+
+    # 验收检查
+    print("\n" + "=" * 60)
+    print("验收检查")
+    print("=" * 60)
+
+    for url in test_urls:
+        ext = URLFeatureExtractor(url)
+        features = ext.extract_all_url_features()
+        assert len(features) == 17, f"应该有17个特征，实际有{len(features)}个"
+
+    print("\n[OK] Day 7验证通过! 全部17个URL词法特征已实现。")
