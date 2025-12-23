@@ -18,6 +18,12 @@ from urllib.parse import urlparse
 from typing import Dict, List, Union, Optional
 import logging
 import tldextract
+import requests
+import time
+import warnings
+
+# 禁用SSL警告（因为我们设置verify=False）
+warnings.filterwarnings('ignore', message='Unverified HTTPS request')
 
 import sys
 import os
@@ -480,12 +486,255 @@ def batch_extract_all_features(urls: List[str]) -> List[Dict[str, Union[int, flo
     return results
 
 
-# ==================== 预留的其他特征提取器 ====================
+# ==================== HTTP响应特征提取器 ====================
 
 class HTTPFeatureExtractor:
-    """HTTP响应特征提取器"""
-    # TODO: Day 8-9 实现
-    pass
+    """
+    HTTP响应特征提取器
+
+    通过发送HTTP请求获取目标网站的响应信息，提取5维特征。
+    这些特征需要实际访问目标网站，提取速度较慢（通常1-10秒）。
+
+    对于无法访问的URL，所有特征返回默认值-1。
+
+    Attributes:
+        url (str): 目标URL
+        TIMEOUT (int): 请求超时时间（秒）
+        USER_AGENT (str): 浏览器User-Agent
+
+    Example:
+        >>> extractor = HTTPFeatureExtractor("https://google.com")
+        >>> features = extractor.extract_all()
+        >>> print(features['http_status_code'])
+        200
+    """
+
+    # 请求超时时间（秒）
+    TIMEOUT = 10
+
+    # 模拟Chrome浏览器的User-Agent
+    USER_AGENT = (
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) '
+        'Chrome/120.0.0.0 Safari/537.36'
+    )
+
+    # 常见的Web服务器类型
+    KNOWN_SERVERS = ['nginx', 'apache', 'iis', 'cloudflare', 'gws', 'microsoft']
+
+    def __init__(self, url: str):
+        """
+        初始化HTTP特征提取器
+
+        Args:
+            url: 目标URL字符串
+        """
+        self.url = url.strip() if url else ''
+
+        # 补全协议前缀
+        if self.url and not self.url.startswith(('http://', 'https://')):
+            self.url = 'http://' + self.url
+
+        # 响应对象（惰性加载）
+        self._response = None
+        self._response_time = -1
+        self._fetched = False
+        self._error = None
+
+    def _fetch(self):
+        """
+        发送HTTP请求获取响应（惰性加载）
+
+        只在第一次调用特征方法时发送请求，
+        后续调用复用已获取的响应对象。
+        """
+        if self._fetched:
+            return
+
+        self._fetched = True
+
+        if not self.url:
+            self._error = "URL为空"
+            return
+
+        try:
+            # 记录请求开始时间
+            start_time = time.time()
+
+            # 发送GET请求
+            self._response = requests.get(
+                self.url,
+                timeout=self.TIMEOUT,
+                allow_redirects=True,  # 允许重定向
+                headers={'User-Agent': self.USER_AGENT},
+                verify=False  # 忽略SSL证书验证
+            )
+
+            # 计算响应时间
+            self._response_time = time.time() - start_time
+
+        except requests.exceptions.Timeout:
+            self._error = "请求超时"
+            self._response = None
+            self._response_time = -1
+
+        except requests.exceptions.ConnectionError:
+            self._error = "连接失败"
+            self._response = None
+            self._response_time = -1
+
+        except requests.exceptions.SSLError:
+            self._error = "SSL错误"
+            self._response = None
+            self._response_time = -1
+
+        except requests.exceptions.TooManyRedirects:
+            self._error = "重定向过多"
+            self._response = None
+            self._response_time = -1
+
+        except requests.exceptions.RequestException as e:
+            self._error = f"请求异常: {str(e)}"
+            self._response = None
+            self._response_time = -1
+
+        except Exception as e:
+            self._error = f"未知错误: {str(e)}"
+            self._response = None
+            self._response_time = -1
+
+    def http_status_code(self) -> int:
+        """
+        获取HTTP响应状态码
+
+        常见状态码含义：
+        - 200: 请求成功
+        - 301/302: 重定向
+        - 403: 禁止访问
+        - 404: 页面不存在
+        - 500: 服务器错误
+        - -1: 请求失败
+
+        Returns:
+            int: HTTP状态码，失败返回-1
+        """
+        self._fetch()
+        if self._response is None:
+            return -1
+        return self._response.status_code
+
+    def http_response_time(self) -> float:
+        """
+        获取HTTP响应时间
+
+        计算从发送请求到收到完整响应的时间。
+        钓鱼网站通常响应较慢。
+
+        Returns:
+            float: 响应时间（秒），保留3位小数，失败返回-1
+        """
+        self._fetch()
+        if self._response_time < 0:
+            return -1
+        return round(self._response_time, 3)
+
+    def http_redirect_count(self) -> int:
+        """
+        获取重定向次数
+
+        统计请求过程中经历的重定向跳转次数。
+        钓鱼网站常有多次重定向以隐藏真实地址。
+
+        Returns:
+            int: 重定向次数，失败返回-1
+        """
+        self._fetch()
+        if self._response is None:
+            return -1
+        # response.history 是重定向响应的列表
+        return len(self._response.history)
+
+    def content_length(self) -> int:
+        """
+        获取响应内容长度
+
+        钓鱼页面通常较简单，内容长度较小。
+
+        Returns:
+            int: 内容字节数，失败返回-1
+        """
+        self._fetch()
+        if self._response is None:
+            return -1
+        return len(self._response.content)
+
+    def server_type(self) -> int:
+        """
+        获取服务器类型编码
+
+        从Server响应头提取服务器信息并编码：
+        - 1: 常见服务器（nginx, apache, iis, cloudflare等）
+        - 0: 其他服务器
+        - -1: 无Server头信息
+
+        Returns:
+            int: 服务器类型编码
+        """
+        self._fetch()
+        if self._response is None:
+            return -1
+
+        # 获取Server响应头
+        server = self._response.headers.get('Server', '').lower()
+
+        if not server:
+            return -1
+
+        # 检查是否为常见服务器
+        for known in self.KNOWN_SERVERS:
+            if known in server:
+                return 1
+
+        return 0
+
+    def extract_all(self) -> Dict[str, Union[int, float]]:
+        """
+        提取全部5维HTTP响应特征
+
+        Returns:
+            dict: 包含5个HTTP特征的字典
+        """
+        return {
+            'http_status_code': self.http_status_code(),
+            'http_response_time': self.http_response_time(),
+            'http_redirect_count': self.http_redirect_count(),
+            'content_length': self.content_length(),
+            'server_type': self.server_type()
+        }
+
+    def get_error(self) -> str:
+        """
+        获取请求错误信息
+
+        Returns:
+            str: 错误信息，无错误返回None
+        """
+        self._fetch()
+        return self._error
+
+
+def extract_http_features(url: str) -> Dict[str, Union[int, float]]:
+    """
+    便捷函数：提取单个URL的HTTP响应特征
+
+    Args:
+        url: URL字符串
+
+    Returns:
+        dict: HTTP特征字典
+    """
+    extractor = HTTPFeatureExtractor(url)
+    return extractor.extract_all()
 
 
 class SSLFeatureExtractor:
