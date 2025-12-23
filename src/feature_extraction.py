@@ -1122,15 +1122,436 @@ def extract_ssl_features(url: str) -> Dict[str, int]:
 # ==================== DNS特征提取器 ====================
 
 class DNSFeatureExtractor:
-    """DNS特征提取器"""
-    # TODO: Day 12-13 实现
-    pass
+    """
+    DNS特征提取器
 
+    通过DNS查询获取域名的解析信息，提取3维特征。
+
+    Attributes:
+        url (str): 目标URL
+        domain (str): 域名
+        TIMEOUT (int): DNS查询超时时间（秒）
+
+    Example:
+        >>> extractor = DNSFeatureExtractor("https://google.com")
+        >>> features = extractor.extract_all()
+        >>> print(features['dns_record_count'])
+        5
+    """
+
+    # DNS查询超时时间（秒）
+    TIMEOUT = 5
+
+    def __init__(self, url: str):
+        """
+        初始化DNS特征提取器
+
+        Args:
+            url: 目标URL字符串
+        """
+        self.url = url.strip() if url else ''
+
+        # 解析URL获取域名
+        try:
+            parsed = urlparse(self.url if '://' in self.url else f'http://{self.url}')
+            self.domain = parsed.netloc
+            # 移除端口号
+            if ':' in self.domain:
+                self.domain = self.domain.split(':')[0]
+        except Exception:
+            self.domain = ''
+
+        # DNS查询结果（惰性加载）
+        self._dns_result = None
+        self._resolve_time = -1
+        self._fetched = False
+        self._error = None
+
+    def _fetch_dns(self):
+        """
+        执行DNS查询（惰性加载）
+        """
+        if self._fetched:
+            return
+
+        self._fetched = True
+
+        if not self.domain:
+            self._error = "域名为空"
+            return
+
+        # 设置socket超时
+        original_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(self.TIMEOUT)
+
+        try:
+            # 记录开始时间
+            start_time = time.time()
+
+            # 执行DNS查询
+            # gethostbyname_ex返回: (hostname, aliaslist, ipaddrlist)
+            self._dns_result = socket.gethostbyname_ex(self.domain)
+
+            # 计算解析时间
+            self._resolve_time = time.time() - start_time
+
+        except socket.gaierror as e:
+            self._error = f"DNS解析失败: {str(e)}"
+            self._dns_result = None
+            self._resolve_time = -1
+
+        except socket.timeout:
+            self._error = "DNS查询超时"
+            self._dns_result = None
+            self._resolve_time = -1
+
+        except Exception as e:
+            self._error = f"未知错误: {str(e)}"
+            self._dns_result = None
+            self._resolve_time = -1
+
+        finally:
+            # 恢复原始超时设置
+            socket.setdefaulttimeout(original_timeout)
+
+    def domain_entropy(self) -> float:
+        """
+        计算域名字符串的信息熵
+
+        信息熵反映字符串的随机程度。
+        随机生成的域名（如DGA生成）熵值通常较高。
+
+        计算公式：H = -Σ(p × log2(p))
+        其中p为各字符出现的概率。
+
+        Returns:
+            float: 域名的信息熵值，保留4位小数
+        """
+        if not self.domain:
+            return 0.0
+
+        # 统计每个字符出现的次数
+        char_count = {}
+        for c in self.domain:
+            char_count[c] = char_count.get(c, 0) + 1
+
+        # 计算概率和熵
+        length = len(self.domain)
+        entropy_value = 0.0
+        for count in char_count.values():
+            prob = count / length
+            if prob > 0:
+                entropy_value -= prob * np.log2(prob)
+
+        return round(entropy_value, 4)
+
+    def dns_resolve_time(self) -> float:
+        """
+        获取DNS解析时间
+
+        测量从发起DNS查询到获得结果的时间。
+        新注册的域名或CDN域名可能解析较慢。
+
+        Returns:
+            float: 解析时间（秒），保留4位小数，-1表示解析失败
+        """
+        self._fetch_dns()
+
+        if self._resolve_time < 0:
+            return -1
+
+        return round(self._resolve_time, 4)
+
+    def dns_record_count(self) -> int:
+        """
+        获取域名对应的IP地址数量
+
+        大型网站通常有多个IP地址用于负载均衡。
+        只有一个IP的域名可能是可疑特征。
+
+        Returns:
+            int: IP记录数量，-1表示解析失败
+        """
+        self._fetch_dns()
+
+        if self._dns_result is None:
+            return -1
+
+        # dns_result格式: (hostname, aliaslist, ipaddrlist)
+        ip_list = self._dns_result[2]
+        return len(ip_list)
+
+    def extract_all(self) -> Dict[str, Union[int, float]]:
+        """
+        提取全部3维DNS特征
+
+        Returns:
+            dict: 包含3个DNS特征的字典
+        """
+        return {
+            'domain_entropy': self.domain_entropy(),
+            'dns_resolve_time': self.dns_resolve_time(),
+            'dns_record_count': self.dns_record_count()
+        }
+
+    def get_error(self) -> Optional[str]:
+        """
+        获取错误信息
+
+        Returns:
+            str: 错误信息，无错误返回None
+        """
+        self._fetch_dns()
+        return self._error
+
+    def get_ip_addresses(self) -> list:
+        """
+        获取解析到的IP地址列表
+
+        Returns:
+            list: IP地址列表，解析失败返回空列表
+        """
+        self._fetch_dns()
+
+        if self._dns_result is None:
+            return []
+
+        return self._dns_result[2]
+
+
+def extract_dns_features(url: str) -> Dict[str, Union[int, float]]:
+    """
+    便捷函数：提取单个URL的DNS特征
+
+    Args:
+        url: URL字符串
+
+    Returns:
+        dict: DNS特征字典
+    """
+    extractor = DNSFeatureExtractor(url)
+    return extractor.extract_all()
+
+
+# ==================== 特征提取主类 ====================
 
 class FeatureExtractor:
-    """综合特征提取器"""
-    # TODO: 整合所有特征提取器
-    pass
+    """
+    特征提取主类
+
+    整合URL词法特征（17维）、HTTP响应特征（5维）、
+    SSL证书特征（5维）和DNS特征（3维），共30维特征。
+
+    提供统一的特征提取接口，支持仅提取URL特征（快速）
+    或提取全部特征（需要网络请求，较慢）。
+
+    Attributes:
+        url (str): 目标URL
+        url_extractor: URL词法特征提取器
+        http_extractor: HTTP响应特征提取器
+        ssl_extractor: SSL证书特征提取器
+        dns_extractor: DNS特征提取器
+
+    Example:
+        >>> extractor = FeatureExtractor("https://google.com")
+        >>> # 仅URL特征（快速，17维）
+        >>> url_features = extractor.extract_url_only()
+        >>> # 全部特征（较慢，30维）
+        >>> all_features = extractor.extract_all()
+    """
+
+    # 特征名称列表（按顺序）
+    URL_FEATURE_NAMES = [
+        'url_length', 'domain_length', 'path_length',
+        'num_dots', 'num_hyphens', 'num_underscores', 'num_slashes', 'num_digits',
+        'has_ip', 'has_at', 'num_subdomains', 'has_https', 'path_depth',
+        'has_port', 'entropy', 'is_shortening', 'has_suspicious'
+    ]
+
+    HTTP_FEATURE_NAMES = [
+        'http_status_code', 'http_response_time', 'http_redirect_count',
+        'content_length', 'server_type'
+    ]
+
+    SSL_FEATURE_NAMES = [
+        'ssl_cert_valid', 'ssl_cert_days', 'ssl_issuer_type',
+        'ssl_self_signed', 'ssl_cert_age'
+    ]
+
+    DNS_FEATURE_NAMES = [
+        'domain_entropy', 'dns_resolve_time', 'dns_record_count'
+    ]
+
+    ALL_FEATURE_NAMES = URL_FEATURE_NAMES + HTTP_FEATURE_NAMES + SSL_FEATURE_NAMES + DNS_FEATURE_NAMES
+
+    def __init__(self, url: str):
+        """
+        初始化特征提取器
+
+        Args:
+            url: 目标URL字符串
+        """
+        self.url = url.strip() if url else ''
+
+        # 初始化各个子提取器
+        self.url_extractor = URLFeatureExtractor(self.url)
+        self.http_extractor = HTTPFeatureExtractor(self.url)
+        self.ssl_extractor = SSLFeatureExtractor(self.url)
+        self.dns_extractor = DNSFeatureExtractor(self.url)
+
+    def extract_url_only(self) -> Dict[str, Union[int, float]]:
+        """
+        仅提取URL词法特征（17维）
+
+        无需网络请求，速度快（毫秒级）。
+        适用于需要快速分析大量URL的场景。
+
+        Returns:
+            dict: 17维URL词法特征
+        """
+        return self.url_extractor.extract_all_url_features()
+
+    def extract_http_features(self) -> Dict[str, Union[int, float]]:
+        """
+        提取HTTP响应特征（5维）
+
+        需要发送HTTP请求，速度较慢。
+
+        Returns:
+            dict: 5维HTTP特征
+        """
+        return self.http_extractor.extract_all()
+
+    def extract_ssl_features(self) -> Dict[str, int]:
+        """
+        提取SSL证书特征（5维）
+
+        需要建立SSL连接，速度较慢。
+
+        Returns:
+            dict: 5维SSL特征
+        """
+        return self.ssl_extractor.extract_all()
+
+    def extract_dns_features(self) -> Dict[str, Union[int, float]]:
+        """
+        提取DNS特征（3维）
+
+        需要DNS查询，速度中等。
+
+        Returns:
+            dict: 3维DNS特征
+        """
+        return self.dns_extractor.extract_all()
+
+    def extract_network_features(self) -> Dict[str, Union[int, float]]:
+        """
+        提取所有网络特征（13维）
+
+        包括HTTP（5维）+ SSL（5维）+ DNS（3维）。
+        需要网络请求，速度较慢。
+
+        Returns:
+            dict: 13维网络特征
+        """
+        features = {}
+        features.update(self.extract_http_features())
+        features.update(self.extract_ssl_features())
+        features.update(self.extract_dns_features())
+        return features
+
+    def extract_all(self) -> Dict[str, Union[int, float]]:
+        """
+        提取全部30维特征
+
+        包括：
+        - URL词法特征（17维）
+        - HTTP响应特征（5维）
+        - SSL证书特征（5维）
+        - DNS特征（3维）
+
+        需要网络请求，速度较慢（通常5-30秒）。
+
+        Returns:
+            dict: 30维完整特征
+        """
+        features = {}
+
+        # URL特征（17维）
+        features.update(self.extract_url_only())
+
+        # HTTP特征（5维）
+        features.update(self.extract_http_features())
+
+        # SSL特征（5维）
+        features.update(self.extract_ssl_features())
+
+        # DNS特征（3维）
+        features.update(self.extract_dns_features())
+
+        return features
+
+    def extract_all_array(self) -> np.ndarray:
+        """
+        以numpy数组格式返回全部30维特征
+
+        按照 ALL_FEATURE_NAMES 定义的顺序返回。
+
+        Returns:
+            ndarray: 30维特征向量
+        """
+        features = self.extract_all()
+        return np.array([features[name] for name in self.ALL_FEATURE_NAMES])
+
+    def extract_url_only_array(self) -> np.ndarray:
+        """
+        以numpy数组格式返回URL词法特征
+
+        Returns:
+            ndarray: 17维特征向量
+        """
+        features = self.extract_url_only()
+        return np.array([features[name] for name in self.URL_FEATURE_NAMES])
+
+    @classmethod
+    def get_feature_names(cls) -> list:
+        """
+        获取全部特征名称列表
+
+        Returns:
+            list: 30个特征名称
+        """
+        return cls.ALL_FEATURE_NAMES.copy()
+
+    @classmethod
+    def get_url_feature_names(cls) -> list:
+        """
+        获取URL特征名称列表
+
+        Returns:
+            list: 17个URL特征名称
+        """
+        return cls.URL_FEATURE_NAMES.copy()
+
+
+# ==================== 综合便捷函数 ====================
+
+def extract_features(url: str, include_network: bool = True) -> Dict[str, Union[int, float]]:
+    """
+    便捷函数：提取单个URL的特征
+
+    Args:
+        url: URL字符串
+        include_network: 是否包含网络特征（HTTP/SSL/DNS）
+
+    Returns:
+        dict: 特征字典（17维或30维）
+    """
+    extractor = FeatureExtractor(url)
+    if include_network:
+        return extractor.extract_all()
+    else:
+        return extractor.extract_url_only()
 
 
 if __name__ == '__main__':
