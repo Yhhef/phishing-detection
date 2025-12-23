@@ -13,9 +13,12 @@
 """
 
 import re
+import ssl
+import socket
 import numpy as np
 from urllib.parse import urlparse
-from typing import Dict, List, Union, Optional
+from typing import Dict, List, Union, Optional, Tuple
+from datetime import datetime
 import logging
 import tldextract
 import requests
@@ -737,11 +740,386 @@ def extract_http_features(url: str) -> Dict[str, Union[int, float]]:
     return extractor.extract_all()
 
 
-class SSLFeatureExtractor:
-    """SSL证书特征提取器"""
-    # TODO: Day 10-11 实现
-    pass
+# ==================== TLS/SSL证书特征提取器 ====================
 
+class SSLFeatureExtractor:
+    """
+    TLS/SSL证书特征提取器
+
+    通过SSL连接获取目标网站的证书信息，提取5维特征。
+    这些特征需要建立SSL连接，提取速度较慢（通常1-10秒）。
+
+    对于非HTTPS网站或无法建立SSL连接的URL，所有特征返回默认值。
+
+    Attributes:
+        url (str): 目标URL
+        domain (str): 域名（不含端口）
+        TIMEOUT (int): 连接超时时间（秒）
+
+    Example:
+        >>> extractor = SSLFeatureExtractor("https://google.com")
+        >>> features = extractor.extract_all()
+        >>> print(features['ssl_cert_valid'])
+        1
+    """
+
+    # 连接超时时间（秒）
+    TIMEOUT = 10
+
+    # 知名的商业证书颁发机构
+    KNOWN_CAS = [
+        'DigiCert', 'Comodo', 'GlobalSign', 'Symantec',
+        'GeoTrust', 'Thawte', 'VeriSign', 'Entrust',
+        'GoDaddy', 'Sectigo', 'RapidSSL'
+    ]
+
+    # 免费的证书颁发机构
+    FREE_CAS = [
+        "Let's Encrypt", 'ZeroSSL', 'Buypass',
+        'Cloudflare', 'Google Trust Services'
+    ]
+
+    def __init__(self, url: str):
+        """
+        初始化SSL特征提取器
+
+        Args:
+            url: 目标URL字符串
+        """
+        self.url = url.strip() if url else ''
+
+        # 解析URL获取域名
+        try:
+            parsed = urlparse(self.url)
+            self.domain = parsed.netloc
+            # 移除端口号
+            if ':' in self.domain:
+                self.domain = self.domain.split(':')[0]
+        except Exception:
+            self.domain = ''
+
+        # 证书信息（惰性加载）
+        self._cert = None
+        self._fetched = False
+        self._error = None
+
+    def _fetch_cert(self):
+        """
+        获取SSL证书信息（惰性加载）
+
+        只在第一次调用特征方法时获取证书，
+        后续调用复用已获取的证书信息。
+        """
+        if self._fetched:
+            return
+
+        self._fetched = True
+
+        if not self.domain:
+            self._error = "域名为空"
+            return
+
+        try:
+            # 创建SSL上下文
+            context = ssl.create_default_context()
+
+            # 建立TCP连接
+            with socket.create_connection(
+                (self.domain, 443),
+                timeout=self.TIMEOUT
+            ) as sock:
+                # 包装为SSL连接
+                with context.wrap_socket(
+                    sock,
+                    server_hostname=self.domain
+                ) as ssock:
+                    # 获取证书信息（字典格式）
+                    self._cert = ssock.getpeercert()
+
+        except ssl.SSLCertVerificationError as e:
+            self._error = f"证书验证失败: {str(e)}"
+            # 尝试不验证证书获取信息
+            self._fetch_cert_unverified()
+
+        except ssl.SSLError as e:
+            self._error = f"SSL错误: {str(e)}"
+            self._cert = None
+
+        except socket.timeout:
+            self._error = "连接超时"
+            self._cert = None
+
+        except socket.error as e:
+            self._error = f"连接失败: {str(e)}"
+            self._cert = None
+
+        except Exception as e:
+            self._error = f"未知错误: {str(e)}"
+            self._cert = None
+
+    def _fetch_cert_unverified(self):
+        """
+        不验证证书获取信息（用于处理自签名或过期证书）
+        """
+        try:
+            # 创建不验证证书的上下文
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+
+            with socket.create_connection(
+                (self.domain, 443),
+                timeout=self.TIMEOUT
+            ) as sock:
+                with context.wrap_socket(
+                    sock,
+                    server_hostname=self.domain
+                ) as ssock:
+                    # 获取证书（DER格式）
+                    cert_der = ssock.getpeercert(binary_form=True)
+                    if cert_der:
+                        # 尝试获取解析后的证书
+                        self._cert = ssock.getpeercert()
+
+        except Exception as e:
+            self._error = f"获取证书失败: {str(e)}"
+            self._cert = None
+
+    def _parse_cert_date(self, date_str: str) -> Optional[datetime]:
+        """
+        解析证书日期字符串
+
+        Args:
+            date_str: 证书日期字符串，如 'Dec 31 23:59:59 2024 GMT'
+
+        Returns:
+            datetime对象，解析失败返回None
+        """
+        if not date_str:
+            return None
+
+        try:
+            # 标准格式
+            return datetime.strptime(date_str, '%b %d %H:%M:%S %Y %Z')
+        except ValueError:
+            pass
+
+        try:
+            # 备用格式
+            return datetime.strptime(date_str, '%b %d %H:%M:%S %Y')
+        except ValueError:
+            pass
+
+        return None
+
+    def _get_issuer_org(self) -> str:
+        """获取证书颁发者组织名"""
+        if not self._cert:
+            return ''
+
+        try:
+            issuer = self._cert.get('issuer', [])
+            # issuer格式: ((('组织名类型', '组织名'),), ...)
+            for item in issuer:
+                for key, value in item:
+                    if key == 'organizationName':
+                        return value
+        except Exception:
+            pass
+
+        return ''
+
+    def _get_subject_org(self) -> str:
+        """获取证书主体组织名"""
+        if not self._cert:
+            return ''
+
+        try:
+            subject = self._cert.get('subject', [])
+            for item in subject:
+                for key, value in item:
+                    if key == 'organizationName':
+                        return value
+        except Exception:
+            pass
+
+        return ''
+
+    def ssl_cert_valid(self) -> int:
+        """
+        检测SSL证书是否有效
+
+        能够成功获取证书信息即认为有效。
+
+        Returns:
+            int: 1=有效, 0=无效或无法获取
+        """
+        self._fetch_cert()
+        return 1 if self._cert else 0
+
+    def ssl_cert_days(self) -> int:
+        """
+        获取证书剩余有效天数
+
+        计算当前时间到证书过期时间的天数。
+        负数表示证书已过期。
+
+        Returns:
+            int: 剩余天数，-1表示无法获取
+        """
+        self._fetch_cert()
+
+        if not self._cert:
+            return -1
+
+        try:
+            not_after = self._cert.get('notAfter', '')
+            expire_date = self._parse_cert_date(not_after)
+
+            if expire_date:
+                delta = expire_date - datetime.now()
+                return delta.days
+
+        except Exception:
+            pass
+
+        return -1
+
+    def ssl_issuer_type(self) -> int:
+        """
+        获取证书颁发机构类型
+
+        编码规则：
+        - 1: 知名商业CA（DigiCert、Comodo等）
+        - 0: 免费CA（Let's Encrypt等）
+        - -1: 其他或自签名
+
+        Returns:
+            int: 颁发机构类型编码
+        """
+        self._fetch_cert()
+
+        if not self._cert:
+            return -1
+
+        issuer_org = self._get_issuer_org()
+
+        if not issuer_org:
+            return -1
+
+        # 检查是否为知名CA
+        for ca in self.KNOWN_CAS:
+            if ca.lower() in issuer_org.lower():
+                return 1
+
+        # 检查是否为免费CA
+        for ca in self.FREE_CAS:
+            if ca.lower() in issuer_org.lower():
+                return 0
+
+        return -1
+
+    def ssl_self_signed(self) -> int:
+        """
+        检测是否为自签名证书
+
+        自签名证书的颁发者和主体相同。
+
+        Returns:
+            int: 1=自签名, 0=非自签名, -1=无法判断
+        """
+        self._fetch_cert()
+
+        if not self._cert:
+            return -1
+
+        issuer_org = self._get_issuer_org()
+        subject_org = self._get_subject_org()
+
+        if not issuer_org or not subject_org:
+            return -1
+
+        # 颁发者和主体相同则为自签名
+        return 1 if issuer_org.lower() == subject_org.lower() else 0
+
+    def ssl_cert_age(self) -> int:
+        """
+        获取证书已颁发天数
+
+        计算证书颁发时间到当前时间的天数。
+
+        Returns:
+            int: 已颁发天数，-1表示无法获取
+        """
+        self._fetch_cert()
+
+        if not self._cert:
+            return -1
+
+        try:
+            not_before = self._cert.get('notBefore', '')
+            issue_date = self._parse_cert_date(not_before)
+
+            if issue_date:
+                delta = datetime.now() - issue_date
+                return delta.days
+
+        except Exception:
+            pass
+
+        return -1
+
+    def extract_all(self) -> Dict[str, int]:
+        """
+        提取全部5维SSL证书特征
+
+        Returns:
+            dict: 包含5个SSL特征的字典
+        """
+        return {
+            'ssl_cert_valid': self.ssl_cert_valid(),
+            'ssl_cert_days': self.ssl_cert_days(),
+            'ssl_issuer_type': self.ssl_issuer_type(),
+            'ssl_self_signed': self.ssl_self_signed(),
+            'ssl_cert_age': self.ssl_cert_age()
+        }
+
+    def get_error(self) -> Optional[str]:
+        """
+        获取错误信息
+
+        Returns:
+            str: 错误信息，无错误返回None
+        """
+        self._fetch_cert()
+        return self._error
+
+    def get_cert_info(self) -> Optional[Dict]:
+        """
+        获取完整证书信息（用于调试）
+
+        Returns:
+            dict: 证书信息字典，无证书返回None
+        """
+        self._fetch_cert()
+        return self._cert
+
+
+def extract_ssl_features(url: str) -> Dict[str, int]:
+    """
+    便捷函数：提取单个URL的SSL证书特征
+
+    Args:
+        url: URL字符串
+
+    Returns:
+        dict: SSL特征字典
+    """
+    extractor = SSLFeatureExtractor(url)
+    return extractor.extract_all()
+
+
+# ==================== DNS特征提取器 ====================
 
 class DNSFeatureExtractor:
     """DNS特征提取器"""
