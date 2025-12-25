@@ -1534,6 +1534,287 @@ class FeatureExtractor:
         return cls.URL_FEATURE_NAMES.copy()
 
 
+# ==================== 批量特征提取器 ====================
+
+class BatchFeatureExtractor:
+    """
+    批量特征提取器
+
+    支持大规模URL数据集的特征提取，具有以下特性：
+    - 进度条显示
+    - 断点续传
+    - 错误处理和日志记录
+
+    Attributes:
+        output_path (str): 输出文件路径
+        checkpoint_interval (int): 检查点保存间隔
+        include_network (bool): 是否包含网络特征
+
+    Example:
+        >>> extractor = BatchFeatureExtractor('output.csv')
+        >>> extractor.extract(urls, labels)
+    """
+
+    def __init__(
+        self,
+        output_path: str,
+        checkpoint_interval: int = 100,
+        include_network: bool = False
+    ):
+        """
+        初始化批量特征提取器
+
+        Args:
+            output_path: 输出CSV文件路径
+            checkpoint_interval: 每处理多少条保存一次检查点
+            include_network: 是否提取网络特征（HTTP/SSL/DNS）
+        """
+        self.output_path = output_path
+        self.checkpoint_interval = checkpoint_interval
+        self.include_network = include_network
+
+        # 确保输出目录存在
+        import os
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
+        # 特征名列表
+        self.feature_names = FeatureExtractor.get_feature_names() if include_network \
+            else FeatureExtractor.get_url_feature_names()
+
+        # 统计信息
+        self.success_count = 0
+        self.error_count = 0
+        self.errors = []
+
+    def _get_checkpoint(self) -> int:
+        """
+        获取已处理的记录数（用于断点续传）
+
+        Returns:
+            int: 已处理的记录数
+        """
+        import os
+        import pandas as pd
+
+        if not os.path.exists(self.output_path):
+            return 0
+
+        try:
+            df = pd.read_csv(self.output_path)
+            return len(df)
+        except Exception:
+            return 0
+
+    def _extract_single(self, url: str) -> Dict[str, Union[int, float]]:
+        """
+        提取单个URL的特征
+
+        Args:
+            url: URL字符串
+
+        Returns:
+            dict: 特征字典
+        """
+        try:
+            extractor = FeatureExtractor(url)
+            if self.include_network:
+                return extractor.extract_all()
+            else:
+                return extractor.extract_url_only()
+        except Exception as e:
+            logger.warning(f"特征提取失败 [{url}]: {str(e)}")
+            # 返回默认值
+            return {name: -1 for name in self.feature_names}
+
+    def extract(
+        self,
+        urls: List[str],
+        labels: List[int],
+        resume: bool = True
+    ):
+        """
+        批量提取特征
+
+        Args:
+            urls: URL列表
+            labels: 标签列表（0=正常, 1=钓鱼）
+            resume: 是否从断点续传
+
+        Returns:
+            DataFrame: 包含URL、标签和特征的数据框
+        """
+        import pandas as pd
+        from tqdm import tqdm
+
+        # 检查输入
+        if len(urls) != len(labels):
+            raise ValueError("URLs和labels数量不匹配")
+
+        total = len(urls)
+        logger.info(f"开始批量特征提取: {total} 条URL")
+        logger.info(f"特征模式: {'完整30维' if self.include_network else '仅URL词法17维'}")
+
+        # 断点续传
+        start_idx = 0
+        results = []
+
+        if resume:
+            start_idx = self._get_checkpoint()
+            if start_idx > 0:
+                logger.info(f"从断点续传: 已处理 {start_idx} 条，继续处理剩余 {total - start_idx} 条")
+                # 读取已有结果
+                existing_df = pd.read_csv(self.output_path)
+                results = existing_df.to_dict('records')
+
+        # 处理剩余URL
+        remaining_urls = urls[start_idx:]
+        remaining_labels = labels[start_idx:]
+
+        # 使用tqdm显示进度
+        with tqdm(total=len(remaining_urls), desc="特征提取", unit="url") as pbar:
+            for i, (url, label) in enumerate(zip(remaining_urls, remaining_labels)):
+                # 提取特征
+                features = self._extract_single(url)
+
+                # 构建记录
+                record = {'url': url, 'label': label}
+                record.update(features)
+                results.append(record)
+
+                # 更新统计
+                if all(v != -1 for v in features.values()):
+                    self.success_count += 1
+                else:
+                    self.error_count += 1
+                    self.errors.append(url)
+
+                # 更新进度条
+                pbar.update(1)
+
+                # 定期保存检查点
+                if (i + 1) % self.checkpoint_interval == 0:
+                    self._save_checkpoint(results)
+                    logger.info(f"检查点保存: {start_idx + i + 1}/{total}")
+
+        # 最终保存
+        df = pd.DataFrame(results)
+        df.to_csv(self.output_path, index=False)
+
+        # 输出统计
+        logger.info(f"特征提取完成!")
+        logger.info(f"  成功: {self.success_count}")
+        logger.info(f"  失败: {self.error_count}")
+        logger.info(f"  输出: {self.output_path}")
+
+        return df
+
+    def _save_checkpoint(self, results: List[Dict]):
+        """
+        保存检查点
+
+        Args:
+            results: 当前结果列表
+        """
+        import pandas as pd
+        df = pd.DataFrame(results)
+        df.to_csv(self.output_path, index=False)
+
+    def get_statistics(self) -> Dict:
+        """
+        获取提取统计信息
+
+        Returns:
+            dict: 统计信息
+        """
+        return {
+            'success_count': self.success_count,
+            'error_count': self.error_count,
+            'success_rate': self.success_count / (self.success_count + self.error_count)
+                if (self.success_count + self.error_count) > 0 else 0,
+            'error_urls': self.errors[:10]  # 只返回前10个错误URL
+        }
+
+
+# ==================== 批量提取便捷函数 ====================
+
+def batch_extract_features(
+    urls: List[str],
+    labels: List[int],
+    output_path: str,
+    include_network: bool = False,
+    checkpoint_interval: int = 100,
+    resume: bool = True
+):
+    """
+    便捷函数：批量提取URL特征
+
+    Args:
+        urls: URL列表
+        labels: 标签列表
+        output_path: 输出CSV路径
+        include_network: 是否包含网络特征
+        checkpoint_interval: 检查点间隔
+        resume: 是否断点续传
+
+    Returns:
+        DataFrame: 特征数据框
+
+    Example:
+        >>> urls = ['https://google.com', 'http://phishing.com']
+        >>> labels = [0, 1]
+        >>> df = batch_extract_features(urls, labels, 'features.csv')
+    """
+    extractor = BatchFeatureExtractor(
+        output_path=output_path,
+        checkpoint_interval=checkpoint_interval,
+        include_network=include_network
+    )
+    return extractor.extract(urls, labels, resume=resume)
+
+
+def extract_from_csv(
+    input_path: str,
+    output_path: str,
+    url_column: str = 'url',
+    label_column: str = 'label',
+    include_network: bool = False
+):
+    """
+    从CSV文件读取URL并提取特征
+
+    Args:
+        input_path: 输入CSV路径
+        output_path: 输出CSV路径
+        url_column: URL列名
+        label_column: 标签列名
+        include_network: 是否包含网络特征
+
+    Returns:
+        DataFrame: 特征数据框
+    """
+    import pandas as pd
+
+    # 读取输入文件
+    df = pd.read_csv(input_path)
+
+    if url_column not in df.columns:
+        raise ValueError(f"找不到URL列: {url_column}")
+    if label_column not in df.columns:
+        raise ValueError(f"找不到标签列: {label_column}")
+
+    urls = df[url_column].tolist()
+    labels = df[label_column].tolist()
+
+    return batch_extract_features(
+        urls=urls,
+        labels=labels,
+        output_path=output_path,
+        include_network=include_network
+    )
+
+
 # ==================== 综合便捷函数 ====================
 
 def extract_features(url: str, include_network: bool = True) -> Dict[str, Union[int, float]]:
