@@ -512,8 +512,8 @@ class HTTPFeatureExtractor:
         200
     """
 
-    # 请求超时时间（秒）
-    TIMEOUT = 10
+    # 请求超时时间（秒）- 缩短以避免阻塞
+    TIMEOUT = 3
 
     # 模拟Chrome浏览器的User-Agent
     USER_AGENT = (
@@ -763,8 +763,8 @@ class SSLFeatureExtractor:
         1
     """
 
-    # 连接超时时间（秒）
-    TIMEOUT = 10
+    # 连接超时时间（秒）- 缩短以避免阻塞
+    TIMEOUT = 3
 
     # 知名的商业证书颁发机构
     KNOWN_CAS = [
@@ -1139,8 +1139,8 @@ class DNSFeatureExtractor:
         5
     """
 
-    # DNS查询超时时间（秒）
-    TIMEOUT = 5
+    # DNS查询超时时间（秒）- 缩短以避免阻塞
+    TIMEOUT = 2
 
     def __init__(self, url: str):
         """
@@ -1607,9 +1607,15 @@ class BatchFeatureExtractor:
         except Exception:
             return 0
 
+    # 单个URL提取的最大超时时间（秒）
+    SINGLE_URL_TIMEOUT = 30
+
     def _extract_single(self, url: str) -> Dict[str, Union[int, float]]:
         """
         提取单个URL的特征
+
+        对于URL词法特征（快速模式），直接提取。
+        对于网络特征（完整模式），使用ThreadPoolExecutor带超时保护。
 
         Args:
             url: URL字符串
@@ -1619,13 +1625,27 @@ class BatchFeatureExtractor:
         """
         try:
             extractor = FeatureExtractor(url)
-            if self.include_network:
-                return extractor.extract_all()
-            else:
+
+            if not self.include_network:
+                # 快速模式：仅URL词法特征，无需超时保护
                 return extractor.extract_url_only()
+            else:
+                # 完整模式：包含网络特征，使用超时保护
+                from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
+                def extract_all_features():
+                    return extractor.extract_all()
+
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(extract_all_features)
+                    try:
+                        return future.result(timeout=self.SINGLE_URL_TIMEOUT)
+                    except FuturesTimeoutError:
+                        logger.warning(f"特征提取超时 [{url}]: 超过{self.SINGLE_URL_TIMEOUT}秒")
+                        return {name: -1 for name in self.feature_names}
+
         except Exception as e:
             logger.warning(f"特征提取失败 [{url}]: {str(e)}")
-            # 返回默认值
             return {name: -1 for name in self.feature_names}
 
     def extract(
