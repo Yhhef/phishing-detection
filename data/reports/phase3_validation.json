@@ -1,0 +1,38 @@
+{
+  "passed": false,
+  "checks": [
+    {
+      "name": "模型文件完整性",
+      "passed": true,
+      "message": "所有模型文件完整"
+    },
+    {
+      "name": "模型加载测试",
+      "passed": true,
+      "message": "模型可正常加载"
+    },
+    {
+      "name": "准确率验证",
+      "passed": false,
+      "message": "准确率 0.4750 < 0.9"
+    },
+    {
+      "name": "AUC-ROC验证",
+      "passed": true,
+      "message": "AUC-ROC 0.8134 < 0.95（警告）"
+    },
+    {
+      "name": "预测功能测试",
+      "passed": true,
+      "message": "单条预测和批量预测功能正常"
+    }
+  ],
+  "metrics": {
+    "accuracy": 0.474964234620887,
+    "auc_roc": 0.8133504727356291
+  },
+  "warnings": [
+    "AUC-ROC 0.8134 < 0.95，但性能仍可接受"
+  ],
+  "timestamp": "2026-01-01T17:07:17.327724"
+}

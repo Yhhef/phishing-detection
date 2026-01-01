@@ -1,0 +1,18 @@
+{
+  "model_type": "XGBoost",
+  "params": {
+    "n_estimators": 100,
+    "learning_rate": 0.1,
+    "max_depth": 6,
+    "min_child_weight": 1,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "gamma": 0,
+    "reg_alpha": 0,
+    "reg_lambda": 1,
+    "random_state": 42
+  },
+  "n_samples": 5591,
+  "n_features": 30,
+  "saved_at": "2026-01-01T17:07:17.102322"
+}

@@ -2166,5 +2166,232 @@ class TestModelEvaluatorIntegration:
         print(f"  AUC-PR: {metrics['auc_pr']:.4f}")
 
 
+# ==================== Day 20: ModelManager和PhishingPredictor测试 ====================
+
+class TestModelManager:
+    """ModelManager测试类 - Day 20"""
+
+    @pytest.fixture
+    def sample_data(self):
+        """创建测试数据"""
+        np.random.seed(42)
+        X_train = np.random.randn(100, 10)
+        y_train = np.random.randint(0, 2, 100)
+        X_test = np.random.randn(20, 10)
+        y_test = np.random.randint(0, 2, 20)
+        return X_train, y_train, X_test, y_test
+
+    @pytest.fixture
+    def trained_models(self, sample_data):
+        """创建已训练的模型"""
+        X_train, y_train, _, _ = sample_data
+        feature_names = [f'feat_{i}' for i in range(10)]
+
+        rf_trainer = RandomForestTrainer()
+        rf_trainer.build_model(n_estimators=10)
+        rf_trainer.train(X_train, y_train, feature_names=feature_names)
+
+        xgb_trainer = XGBoostTrainer()
+        xgb_trainer.build_model(n_estimators=10)
+        xgb_trainer.train(X_train, y_train, feature_names=feature_names)
+
+        ensemble_trainer = EnsembleTrainer()
+        ensemble_trainer.build_model(rf_model=rf_trainer, xgb_model=xgb_trainer)
+        ensemble_trainer.train(X_train, y_train, feature_names=feature_names)
+
+        return rf_trainer, xgb_trainer, ensemble_trainer, feature_names
+
+    def test_init(self, tmp_path):
+        """测试初始化"""
+        from src.model_training import ModelManager
+        manager = ModelManager(str(tmp_path / 'models'))
+        assert manager.models_dir == str(tmp_path / 'models')
+        assert os.path.exists(manager.models_dir)
+
+    def test_save_model(self, trained_models, tmp_path):
+        """测试保存单个模型"""
+        from src.model_training import ModelManager
+        rf_trainer, _, _, _ = trained_models
+        manager = ModelManager(str(tmp_path / 'models'))
+
+        path = manager.save_model(rf_trainer.model, 'test_model')
+
+        assert os.path.exists(path)
+        assert path.endswith('.pkl')
+
+    def test_load_model(self, trained_models, tmp_path):
+        """测试加载单个模型"""
+        from src.model_training import ModelManager
+        rf_trainer, _, _, _ = trained_models
+        manager = ModelManager(str(tmp_path / 'models'))
+
+        manager.save_model(rf_trainer.model, 'test_model')
+        loaded_model = manager.load_model('test_model')
+
+        assert loaded_model is not None
+        assert 'test_model' in manager.models
+
+    def test_save_all_models(self, trained_models, tmp_path):
+        """测试保存所有模型"""
+        from src.model_training import ModelManager
+        rf_trainer, xgb_trainer, ensemble_trainer, feature_names = trained_models
+        manager = ModelManager(str(tmp_path / 'models'))
+
+        saved_paths = manager.save_all_models(
+            rf_trainer=rf_trainer,
+            xgb_trainer=xgb_trainer,
+            ensemble_trainer=ensemble_trainer,
+            feature_names=feature_names
+        )
+
+        assert 'rf_model_final' in saved_paths
+        assert 'xgb_model_final' in saved_paths
+        assert 'ensemble_model_final' in saved_paths
+        assert os.path.exists(os.path.join(str(tmp_path / 'models'), 'model_config.json'))
+
+    def test_load_all_models(self, trained_models, tmp_path):
+        """测试加载所有模型"""
+        from src.model_training import ModelManager
+        rf_trainer, xgb_trainer, ensemble_trainer, feature_names = trained_models
+        manager = ModelManager(str(tmp_path / 'models'))
+
+        manager.save_all_models(
+            rf_trainer=rf_trainer,
+            xgb_trainer=xgb_trainer,
+            ensemble_trainer=ensemble_trainer,
+            feature_names=feature_names
+        )
+
+        # 新建管理器加载
+        manager2 = ModelManager(str(tmp_path / 'models'))
+        models = manager2.load_all_models()
+
+        assert len(models) >= 3
+
+    def test_export_for_deployment(self, trained_models, tmp_path):
+        """测试导出部署包"""
+        from src.model_training import ModelManager
+        rf_trainer, xgb_trainer, ensemble_trainer, feature_names = trained_models
+        manager = ModelManager(str(tmp_path / 'models'))
+
+        manager.save_all_models(
+            rf_trainer=rf_trainer,
+            xgb_trainer=xgb_trainer,
+            ensemble_trainer=ensemble_trainer,
+            feature_names=feature_names
+        )
+
+        export_dir = str(tmp_path / 'deployment')
+        manager.export_for_deployment(export_dir)
+
+        assert os.path.exists(os.path.join(export_dir, 'model.pkl'))
+        assert os.path.exists(os.path.join(export_dir, 'config.json'))
+        assert os.path.exists(os.path.join(export_dir, 'README.md'))
+
+
+class TestPhishingPredictor:
+    """PhishingPredictor测试类 - Day 20"""
+
+    @pytest.fixture
+    def setup_predictor(self, tmp_path):
+        """设置预测器"""
+        np.random.seed(42)
+        X_train = np.random.randn(100, 10)
+        y_train = np.random.randint(0, 2, 100)
+        feature_names = [f'feat_{i}' for i in range(10)]
+
+        # 训练模型
+        rf_trainer = RandomForestTrainer()
+        rf_trainer.build_model(n_estimators=10)
+        rf_trainer.train(X_train, y_train, feature_names=feature_names)
+
+        xgb_trainer = XGBoostTrainer()
+        xgb_trainer.build_model(n_estimators=10)
+        xgb_trainer.train(X_train, y_train, feature_names=feature_names)
+
+        ensemble_trainer = EnsembleTrainer()
+        ensemble_trainer.build_model(rf_model=rf_trainer, xgb_model=xgb_trainer)
+        ensemble_trainer.train(X_train, y_train, feature_names=feature_names)
+
+        # 保存模型
+        from src.model_training import ModelManager
+        models_dir = str(tmp_path / 'models')
+        manager = ModelManager(models_dir)
+        manager.save_all_models(
+            rf_trainer=rf_trainer,
+            xgb_trainer=xgb_trainer,
+            ensemble_trainer=ensemble_trainer,
+            feature_names=feature_names
+        )
+
+        return models_dir, X_train
+
+    def test_init(self, setup_predictor):
+        """测试初始化"""
+        from src.model_training import PhishingPredictor
+        models_dir, _ = setup_predictor
+        predictor = PhishingPredictor(models_dir)
+
+        assert predictor.model is not None
+        assert len(predictor.feature_names) == 10
+
+    def test_predict(self, setup_predictor):
+        """测试单条预测"""
+        from src.model_training import PhishingPredictor
+        models_dir, X_train = setup_predictor
+        predictor = PhishingPredictor(models_dir)
+
+        result = predictor.predict(X_train[0])
+
+        assert 'prediction' in result
+        assert 'label' in result
+        assert 'is_phishing' in result
+        assert 'probability' in result
+        assert result['prediction'] in [0, 1]
+
+    def test_predict_batch(self, setup_predictor):
+        """测试批量预测"""
+        from src.model_training import PhishingPredictor
+        models_dir, X_train = setup_predictor
+        predictor = PhishingPredictor(models_dir)
+
+        results = predictor.predict_batch(X_train[:5])
+
+        assert len(results) == 5
+        for result in results:
+            assert 'prediction' in result
+            assert 'label' in result
+
+    def test_get_prediction_details(self, setup_predictor):
+        """测试预测详情"""
+        from src.model_training import PhishingPredictor
+        models_dir, X_train = setup_predictor
+        predictor = PhishingPredictor(models_dir)
+
+        result = predictor.get_prediction_details(X_train[0])
+
+        assert 'prediction' in result
+        assert 'features' in result
+        assert 'model_info' in result
+
+
+class TestPhase3Validation:
+    """阶段三验收函数测试 - Day 20"""
+
+    def test_validate_phase3_structure(self):
+        """测试验收函数结构"""
+        from src.model_training import validate_phase3
+
+        # 验证函数存在
+        assert callable(validate_phase3)
+
+    def test_generate_phase3_report_structure(self):
+        """测试报告生成函数结构"""
+        from src.model_training import generate_phase3_report
+
+        # 验证函数存在
+        assert callable(generate_phase3_report)
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

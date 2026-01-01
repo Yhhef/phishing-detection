@@ -1,0 +1,7 @@
+{
+  "model_type": "RandomForest",
+  "params": {},
+  "n_samples": 5591,
+  "n_features": 30,
+  "saved_at": "2026-01-01T17:07:17.098533"
+}
