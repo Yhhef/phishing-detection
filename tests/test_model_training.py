@@ -36,7 +36,10 @@ from src.model_training import (
     get_xgb_param_distributions,
     tune_random_forest,
     tune_xgboost,
-    tune_all_models
+    tune_all_models,
+    ModelEvaluator,
+    evaluate_all_models,
+    generate_final_report
 )
 
 
@@ -1716,6 +1719,451 @@ class TestHyperparameterTunerIntegration:
         print(f"\nXGBoost调优结果:")
         print(f"  最优参数: {tuner.best_params}")
         print(f"  最优分数: {tuner.best_score:.4f}")
+
+
+# ==================== Day 19: ModelEvaluator测试 ====================
+
+class TestModelEvaluator:
+    """ModelEvaluator测试类 - Day 19"""
+
+    @pytest.fixture
+    def sample_data(self):
+        """创建测试数据"""
+        np.random.seed(42)
+        X = np.random.randn(100, 10)
+        y = np.random.randint(0, 2, 100)
+        return X, y
+
+    @pytest.fixture
+    def trained_model(self, sample_data):
+        """创建已训练的模型"""
+        X, y = sample_data
+        from sklearn.ensemble import RandomForestClassifier
+        model = RandomForestClassifier(n_estimators=10, random_state=42)
+        model.fit(X, y)
+        return model
+
+    def test_init(self):
+        """测试初始化"""
+        evaluator = ModelEvaluator()
+        assert evaluator.results == {}
+        assert evaluator.figures == {}
+
+    def test_evaluate_model(self, sample_data, trained_model):
+        """测试模型评估"""
+        X, y = sample_data
+        evaluator = ModelEvaluator()
+
+        metrics = evaluator.evaluate_model(trained_model, X, y, 'TestModel', verbose=False)
+
+        assert 'accuracy' in metrics
+        assert 'precision' in metrics
+        assert 'recall' in metrics
+        assert 'f1' in metrics
+        assert 'auc_roc' in metrics
+        assert 'auc_pr' in metrics
+        assert 'tp' in metrics
+        assert 'tn' in metrics
+        assert 'fp' in metrics
+        assert 'fn' in metrics
+        assert 'specificity' in metrics
+        assert 'mcc' in metrics
+
+        assert 0 <= metrics['accuracy'] <= 1
+        assert 0 <= metrics['auc_roc'] <= 1
+
+    def test_evaluate_model_stores_results(self, sample_data, trained_model):
+        """测试评估结果被正确存储"""
+        X, y = sample_data
+        evaluator = ModelEvaluator()
+
+        evaluator.evaluate_model(trained_model, X, y, 'TestModel', verbose=False)
+
+        assert 'TestModel' in evaluator.results
+        assert evaluator.results['TestModel']['accuracy'] > 0
+
+    def test_get_detailed_metrics(self, sample_data, trained_model):
+        """测试获取详细指标"""
+        X, y = sample_data
+        evaluator = ModelEvaluator()
+
+        evaluator.evaluate_model(trained_model, X, y, 'TestModel', verbose=False)
+        df = evaluator.get_detailed_metrics()
+
+        assert len(df) == 1
+        assert '模型' in df.columns
+        assert '准确率' in df.columns
+        assert 'AUC-ROC' in df.columns
+
+    def test_get_detailed_metrics_specific_model(self, sample_data, trained_model):
+        """测试获取特定模型的详细指标"""
+        X, y = sample_data
+        evaluator = ModelEvaluator()
+
+        evaluator.evaluate_model(trained_model, X, y, 'TestModel', verbose=False)
+        df = evaluator.get_detailed_metrics('TestModel')
+
+        assert len(df) == 1
+        assert df.iloc[0]['模型'] == 'TestModel'
+
+    def test_get_detailed_metrics_model_not_found(self):
+        """测试模型不存在时的错误"""
+        evaluator = ModelEvaluator()
+
+        with pytest.raises(ValueError, match="模型 NonExistent 未评估"):
+            evaluator.get_detailed_metrics('NonExistent')
+
+    def test_multiple_models(self, sample_data):
+        """测试多模型评估"""
+        X, y = sample_data
+
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.linear_model import LogisticRegression
+
+        model1 = RandomForestClassifier(n_estimators=10, random_state=42)
+        model1.fit(X, y)
+
+        model2 = LogisticRegression(random_state=42, max_iter=200)
+        model2.fit(X, y)
+
+        evaluator = ModelEvaluator()
+        evaluator.evaluate_model(model1, X, y, 'RandomForest', verbose=False)
+        evaluator.evaluate_model(model2, X, y, 'LogisticRegression', verbose=False)
+
+        df = evaluator.get_detailed_metrics()
+        assert len(df) == 2
+
+    def test_compare_models(self, sample_data, trained_model):
+        """测试模型比较"""
+        X, y = sample_data
+
+        from sklearn.linear_model import LogisticRegression
+        model2 = LogisticRegression(random_state=42, max_iter=200)
+        model2.fit(X, y)
+
+        evaluator = ModelEvaluator()
+        evaluator.evaluate_model(trained_model, X, y, 'RF', verbose=False)
+        evaluator.evaluate_model(model2, X, y, 'LR', verbose=False)
+
+        comparison = evaluator.compare_models('accuracy')
+        assert len(comparison) == 2
+        assert 'accuracy' in comparison.columns
+
+    def test_compare_models_no_results(self):
+        """测试无评估结果时比较"""
+        evaluator = ModelEvaluator()
+
+        with pytest.raises(ValueError, match="没有评估结果可比较"):
+            evaluator.compare_models()
+
+    def test_generate_report(self, sample_data, trained_model):
+        """测试报告生成"""
+        X, y = sample_data
+        evaluator = ModelEvaluator()
+
+        evaluator.evaluate_model(trained_model, X, y, 'TestModel', verbose=False)
+        report = evaluator.generate_report()
+
+        assert '模型性能评估报告' in report
+        assert 'TestModel' in report
+        assert '准确率' in report
+        assert '目标验证' in report
+
+    def test_generate_report_save(self, sample_data, trained_model, tmp_path):
+        """测试报告保存"""
+        X, y = sample_data
+        evaluator = ModelEvaluator()
+
+        evaluator.evaluate_model(trained_model, X, y, 'TestModel', verbose=False)
+
+        save_path = tmp_path / 'report.txt'
+        evaluator.generate_report(save_path=str(save_path))
+
+        assert save_path.exists()
+
+    def test_save_and_load_results(self, sample_data, trained_model, tmp_path):
+        """测试结果保存和加载"""
+        X, y = sample_data
+        evaluator = ModelEvaluator()
+
+        evaluator.evaluate_model(trained_model, X, y, 'TestModel', verbose=False)
+
+        # 保存
+        filepath = tmp_path / 'results.json'
+        evaluator.save_results(str(filepath))
+
+        assert filepath.exists()
+
+        # 加载
+        evaluator2 = ModelEvaluator()
+        evaluator2.load_results(str(filepath))
+
+        assert 'TestModel' in evaluator2.results
+        assert evaluator2.results['TestModel']['accuracy'] == evaluator.results['TestModel']['accuracy']
+
+    def test_plot_confusion_matrix(self, sample_data, trained_model, tmp_path):
+        """测试混淆矩阵绘制"""
+        X, y = sample_data
+        evaluator = ModelEvaluator()
+
+        evaluator.evaluate_model(trained_model, X, y, 'TestModel', verbose=False)
+
+        save_path = tmp_path / 'confusion_matrix.png'
+        evaluator.plot_confusion_matrix('TestModel', save_path=str(save_path))
+
+        assert save_path.exists()
+        assert 'TestModel_confusion_matrix' in evaluator.figures
+
+    def test_plot_confusion_matrix_normalized(self, sample_data, trained_model, tmp_path):
+        """测试归一化混淆矩阵绘制"""
+        X, y = sample_data
+        evaluator = ModelEvaluator()
+
+        evaluator.evaluate_model(trained_model, X, y, 'TestModel', verbose=False)
+
+        save_path = tmp_path / 'confusion_matrix_norm.png'
+        evaluator.plot_confusion_matrix('TestModel', normalize=True, save_path=str(save_path))
+
+        assert save_path.exists()
+
+    def test_plot_confusion_matrix_model_not_found(self):
+        """测试绘制不存在模型的混淆矩阵"""
+        evaluator = ModelEvaluator()
+
+        with pytest.raises(ValueError, match="模型 NonExistent 未评估"):
+            evaluator.plot_confusion_matrix('NonExistent')
+
+    def test_plot_roc_curve(self, sample_data, trained_model, tmp_path):
+        """测试ROC曲线绘制"""
+        X, y = sample_data
+        evaluator = ModelEvaluator()
+
+        evaluator.evaluate_model(trained_model, X, y, 'TestModel', verbose=False)
+
+        save_path = tmp_path / 'roc_curve.png'
+        evaluator.plot_roc_curve(save_path=str(save_path))
+
+        assert save_path.exists()
+        assert 'roc_curve' in evaluator.figures
+
+    def test_plot_pr_curve(self, sample_data, trained_model, tmp_path):
+        """测试PR曲线绘制"""
+        X, y = sample_data
+        evaluator = ModelEvaluator()
+
+        evaluator.evaluate_model(trained_model, X, y, 'TestModel', verbose=False)
+
+        save_path = tmp_path / 'pr_curve.png'
+        evaluator.plot_pr_curve(save_path=str(save_path))
+
+        assert save_path.exists()
+        assert 'pr_curve' in evaluator.figures
+
+    def test_plot_all_curves(self, sample_data, trained_model, tmp_path):
+        """测试绘制所有曲线"""
+        X, y = sample_data
+        evaluator = ModelEvaluator()
+
+        evaluator.evaluate_model(trained_model, X, y, 'TestModel', verbose=False)
+
+        save_dir = str(tmp_path)
+        evaluator.plot_all_curves('TestModel', y, save_dir=save_dir)
+
+        assert (tmp_path / 'TestModel_evaluation.png').exists()
+        assert 'TestModel_all_curves' in evaluator.figures
+
+    def test_plot_all_curves_model_not_found(self, sample_data):
+        """测试绘制不存在模型的所有曲线"""
+        X, y = sample_data
+        evaluator = ModelEvaluator()
+
+        with pytest.raises(ValueError, match="模型 NonExistent 未评估"):
+            evaluator.plot_all_curves('NonExistent', y)
+
+    def test_plot_metrics_comparison(self, sample_data, tmp_path):
+        """测试指标对比图绘制"""
+        X, y = sample_data
+
+        from sklearn.ensemble import RandomForestClassifier
+        model = RandomForestClassifier(n_estimators=10, random_state=42)
+        model.fit(X, y)
+
+        evaluator = ModelEvaluator()
+        evaluator.evaluate_model(model, X, y, 'TestModel', verbose=False)
+
+        save_path = tmp_path / 'metrics_comparison.png'
+        evaluator.plot_metrics_comparison(save_path=str(save_path))
+
+        assert save_path.exists()
+        assert 'metrics_comparison' in evaluator.figures
+
+    def test_roc_auc_calculation(self, sample_data, trained_model):
+        """测试ROC-AUC计算"""
+        X, y = sample_data
+        evaluator = ModelEvaluator()
+
+        metrics = evaluator.evaluate_model(trained_model, X, y, 'TestModel', verbose=False)
+
+        # 验证ROC曲线数据存在
+        assert 'fpr' in metrics
+        assert 'tpr' in metrics
+        assert len(metrics['fpr']) > 0
+        assert len(metrics['tpr']) > 0
+
+    def test_pr_curve_calculation(self, sample_data, trained_model):
+        """测试PR曲线数据计算"""
+        X, y = sample_data
+        evaluator = ModelEvaluator()
+
+        metrics = evaluator.evaluate_model(trained_model, X, y, 'TestModel', verbose=False)
+
+        # 验证PR曲线数据存在
+        assert 'precision_curve' in metrics
+        assert 'recall_curve' in metrics
+        assert len(metrics['precision_curve']) > 0
+        assert len(metrics['recall_curve']) > 0
+
+
+class TestEvaluationConvenienceFunctions:
+    """评估便捷函数测试 - Day 19"""
+
+    @pytest.fixture
+    def sample_data(self):
+        """创建测试数据"""
+        np.random.seed(42)
+        X_train = np.random.randn(100, 10)
+        y_train = np.random.randint(0, 2, 100)
+        X_test = np.random.randn(20, 10)
+        y_test = np.random.randint(0, 2, 20)
+        return X_train, y_train, X_test, y_test
+
+    def test_evaluate_all_models(self, sample_data):
+        """测试批量评估函数"""
+        X_train, y_train, X_test, y_test = sample_data
+
+        rf_trainer = RandomForestTrainer()
+        rf_trainer.build_model(n_estimators=10)
+        rf_trainer.train(X_train, y_train)
+
+        xgb_trainer = XGBoostTrainer()
+        xgb_trainer.build_model(n_estimators=10)
+        xgb_trainer.train(X_train, y_train)
+
+        evaluator, summary_df = evaluate_all_models(
+            [rf_trainer, xgb_trainer],
+            X_test, y_test
+        )
+
+        assert len(summary_df) == 2
+        assert 'RandomForest' in evaluator.results or 'rf_model' in evaluator.results
+        assert 'XGBoost' in evaluator.results or 'xgb_model' in evaluator.results
+
+    def test_evaluate_all_models_with_save(self, sample_data, tmp_path):
+        """测试批量评估函数带保存"""
+        X_train, y_train, X_test, y_test = sample_data
+
+        rf_trainer = RandomForestTrainer()
+        rf_trainer.build_model(n_estimators=10)
+        rf_trainer.train(X_train, y_train)
+
+        save_dir = str(tmp_path / 'figures')
+        evaluator, summary_df = evaluate_all_models(
+            [rf_trainer],
+            X_test, y_test,
+            save_dir=save_dir
+        )
+
+        # 检查图表文件是否生成
+        assert (tmp_path / 'figures' / 'roc_curves.png').exists()
+        assert (tmp_path / 'figures' / 'pr_curves.png').exists()
+        assert (tmp_path / 'figures' / 'metrics_comparison.png').exists()
+
+    def test_generate_final_report(self, sample_data, tmp_path):
+        """测试生成最终报告"""
+        X_train, y_train, X_test, y_test = sample_data
+
+        rf_trainer = RandomForestTrainer()
+        rf_trainer.build_model(n_estimators=10)
+        rf_trainer.train(X_train, y_train)
+
+        evaluator = ModelEvaluator()
+        evaluator.evaluate_model(rf_trainer.model, X_test, y_test, 'rf_model', verbose=False)
+
+        save_dir = str(tmp_path / 'reports')
+        report_path = generate_final_report(evaluator, save_dir)
+
+        assert os.path.exists(report_path)
+        assert (tmp_path / 'reports' / 'evaluation_report.txt').exists()
+        assert (tmp_path / 'reports' / 'evaluation_results.json').exists()
+        assert (tmp_path / 'reports' / 'evaluation_metrics.csv').exists()
+
+
+class TestModelEvaluatorIntegration:
+    """ModelEvaluator集成测试 - Day 19"""
+
+    @pytest.fixture
+    def real_data(self):
+        """尝试加载真实数据，如果不存在则跳过"""
+        try:
+            X_train, y_train, X_test, y_test, feature_names = load_feature_data(use_30dim=True)
+            return X_train, y_train, X_test, y_test, feature_names
+        except FileNotFoundError:
+            pytest.skip("真实数据文件不存在，跳过集成测试")
+
+    def test_real_data_evaluation(self, real_data):
+        """测试真实数据评估"""
+        X_train, y_train, X_test, y_test, feature_names = real_data
+
+        # 训练模型
+        rf_trainer = RandomForestTrainer()
+        rf_trainer.build_model(n_estimators=100, max_depth=10)
+        rf_trainer.train(X_train, y_train, feature_names=feature_names)
+
+        xgb_trainer = XGBoostTrainer()
+        xgb_trainer.build_model(n_estimators=100, learning_rate=0.1, max_depth=6)
+        xgb_trainer.train(X_train, y_train, feature_names=feature_names)
+
+        # 评估
+        evaluator = ModelEvaluator()
+        rf_metrics = evaluator.evaluate_model(rf_trainer.model, X_test, y_test, 'RandomForest')
+        xgb_metrics = evaluator.evaluate_model(xgb_trainer.model, X_test, y_test, 'XGBoost')
+
+        # Day 19 目标：准确率 >= 90%
+        best_acc = max(rf_metrics['accuracy'], xgb_metrics['accuracy'])
+        assert best_acc >= 0.85, f"准确率 {best_acc:.4f} 低于 85%"
+
+        # 生成报告
+        report = evaluator.generate_report()
+        assert '模型性能评估报告' in report
+
+        print(f"\n真实数据评估结果:")
+        print(f"  RandomForest准确率: {rf_metrics['accuracy']:.4f}")
+        print(f"  XGBoost准确率: {xgb_metrics['accuracy']:.4f}")
+        print(f"  RandomForest AUC-ROC: {rf_metrics['auc_roc']:.4f}")
+        print(f"  XGBoost AUC-ROC: {xgb_metrics['auc_roc']:.4f}")
+
+    def test_ensemble_evaluation(self, real_data):
+        """测试集成模型评估"""
+        X_train, y_train, X_test, y_test, feature_names = real_data
+
+        # 训练集成模型
+        ensemble_trainer = EnsembleTrainer()
+        ensemble_trainer.build_model()
+        ensemble_trainer.train(X_train, y_train, feature_names=feature_names)
+
+        # 评估
+        evaluator = ModelEvaluator()
+        metrics = evaluator.evaluate_model(ensemble_trainer.model, X_test, y_test, 'Ensemble')
+
+        # 验证指标
+        assert metrics['accuracy'] >= 0.85
+        assert 'auc_roc' in metrics
+        assert 'auc_pr' in metrics
+
+        print(f"\n集成模型评估结果:")
+        print(f"  准确率: {metrics['accuracy']:.4f}")
+        print(f"  AUC-ROC: {metrics['auc_roc']:.4f}")
+        print(f"  AUC-PR: {metrics['auc_pr']:.4f}")
 
 
 if __name__ == '__main__':

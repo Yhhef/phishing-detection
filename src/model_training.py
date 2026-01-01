@@ -26,8 +26,11 @@ import joblib
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
-    confusion_matrix, classification_report, roc_auc_score
+    confusion_matrix, classification_report, roc_auc_score,
+    roc_curve, auc, precision_recall_curve, average_precision_score,
+    matthews_corrcoef
 )
+import seaborn as sns
 from sklearn.model_selection import StratifiedKFold, GridSearchCV, RandomizedSearchCV
 from xgboost import XGBClassifier
 from typing import List, Tuple
@@ -2106,6 +2109,765 @@ def tune_all_models(
         xgb_tuner.save_results(os.path.join(save_dir, 'xgb_tuning_results.json'))
 
     return df
+
+
+# ==================== Day 19: 模型评估器 ====================
+
+class ModelEvaluator:
+    """
+    模型性能评估器
+
+    Day 19实现 - 提供全面的模型性能评估功能
+
+    功能包括：
+    - 计算准确率、精确率、召回率、F1、AUC-ROC、AUC-PR等指标
+    - 绘制混淆矩阵、ROC曲线、PR曲线
+    - 生成评估报告
+    - 多模型比较
+
+    Example:
+        >>> evaluator = ModelEvaluator()
+        >>> metrics = evaluator.evaluate_model(model, X_test, y_test, 'RandomForest')
+        >>> evaluator.plot_all_curves('RandomForest', y_test)
+        >>> report = evaluator.generate_report()
+    """
+
+    def __init__(self):
+        """初始化模型评估器"""
+        self.results = {}
+        self.figures = {}
+        self._predictions = {}
+        self._probabilities = {}
+
+        # 设置中文字体
+        plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
+        plt.rcParams['axes.unicode_minus'] = False
+
+    def evaluate_model(
+        self,
+        model,
+        X_test: np.ndarray,
+        y_test: np.ndarray,
+        model_name: str = "Model",
+        verbose: bool = True
+    ) -> Dict[str, Any]:
+        """
+        评估单个模型
+
+        Args:
+            model: 模型对象（需要有predict和predict_proba方法）
+            X_test: 测试特征
+            y_test: 测试标签
+            model_name: 模型名称
+            verbose: 是否打印详细信息
+
+        Returns:
+            dict: 包含所有评估指标的字典
+        """
+        # 获取预测结果
+        if hasattr(model, 'predict'):
+            y_pred = model.predict(X_test)
+        else:
+            raise ValueError("模型需要有predict方法")
+
+        # 获取预测概率
+        if hasattr(model, 'predict_proba'):
+            y_proba = model.predict_proba(X_test)[:, 1]
+        else:
+            y_proba = y_pred.astype(float)
+
+        # 保存预测结果
+        self._predictions[model_name] = y_pred
+        self._probabilities[model_name] = y_proba
+
+        # 计算混淆矩阵
+        cm = confusion_matrix(y_test, y_pred)
+        tn, fp, fn, tp = cm.ravel()
+
+        # 计算各项指标
+        metrics = {
+            'accuracy': accuracy_score(y_test, y_pred),
+            'precision': precision_score(y_test, y_pred, zero_division=0),
+            'recall': recall_score(y_test, y_pred, zero_division=0),
+            'f1': f1_score(y_test, y_pred, zero_division=0),
+            'specificity': tn / (tn + fp) if (tn + fp) > 0 else 0,
+            'mcc': matthews_corrcoef(y_test, y_pred),
+            'auc_roc': roc_auc_score(y_test, y_proba),
+            'auc_pr': average_precision_score(y_test, y_proba),
+            'tp': int(tp),
+            'tn': int(tn),
+            'fp': int(fp),
+            'fn': int(fn)
+        }
+
+        # 计算ROC曲线数据
+        fpr, tpr, roc_thresholds = roc_curve(y_test, y_proba)
+        metrics['fpr'] = fpr
+        metrics['tpr'] = tpr
+        metrics['roc_thresholds'] = roc_thresholds
+
+        # 计算PR曲线数据
+        precision_curve, recall_curve, pr_thresholds = precision_recall_curve(y_test, y_proba)
+        metrics['precision_curve'] = precision_curve
+        metrics['recall_curve'] = recall_curve
+        metrics['pr_thresholds'] = pr_thresholds
+
+        # 保存结果
+        self.results[model_name] = metrics
+
+        if verbose:
+            self._print_metrics(model_name, metrics)
+
+        return metrics
+
+    def _print_metrics(self, model_name: str, metrics: Dict) -> None:
+        """打印评估指标"""
+        print(f"\n[{model_name}] 评估结果:")
+        print("-" * 50)
+        print(f"  准确率 (Accuracy):     {metrics['accuracy']:.4f}")
+        print(f"  精确率 (Precision):    {metrics['precision']:.4f}")
+        print(f"  召回率 (Recall):       {metrics['recall']:.4f}")
+        print(f"  F1分数 (F1-Score):     {metrics['f1']:.4f}")
+        print(f"  特异度 (Specificity):  {metrics['specificity']:.4f}")
+        print(f"  MCC:                   {metrics['mcc']:.4f}")
+        print(f"  AUC-ROC:               {metrics['auc_roc']:.4f}")
+        print(f"  AUC-PR:                {metrics['auc_pr']:.4f}")
+        print("-" * 50)
+        print(f"  混淆矩阵:")
+        print(f"    TP={metrics['tp']}, TN={metrics['tn']}")
+        print(f"    FP={metrics['fp']}, FN={metrics['fn']}")
+        print("-" * 50)
+
+    def plot_confusion_matrix(
+        self,
+        model_name: str,
+        normalize: bool = False,
+        save_path: str = None,
+        figsize: Tuple[int, int] = (8, 6)
+    ) -> None:
+        """
+        绘制混淆矩阵
+
+        Args:
+            model_name: 模型名称
+            normalize: 是否归一化
+            save_path: 图片保存路径
+            figsize: 图片大小
+        """
+        if model_name not in self.results:
+            raise ValueError(f"模型 {model_name} 未评估")
+
+        metrics = self.results[model_name]
+        cm = np.array([[metrics['tn'], metrics['fp']],
+                       [metrics['fn'], metrics['tp']]])
+
+        if normalize:
+            cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+            fmt = '.2%'
+            title = f'{model_name} - 归一化混淆矩阵'
+        else:
+            fmt = 'd'
+            title = f'{model_name} - 混淆矩阵'
+
+        plt.figure(figsize=figsize)
+        sns.heatmap(cm, annot=True, fmt=fmt, cmap='Blues',
+                    xticklabels=['正常网站', '钓鱼网站'],
+                    yticklabels=['正常网站', '钓鱼网站'],
+                    annot_kws={'size': 14})
+        plt.xlabel('预测标签', fontsize=12)
+        plt.ylabel('真实标签', fontsize=12)
+        plt.title(title, fontsize=14)
+        plt.tight_layout()
+
+        if save_path:
+            save_dir = os.path.dirname(save_path)
+            if save_dir:
+                os.makedirs(save_dir, exist_ok=True)
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"混淆矩阵已保存至: {save_path}")
+
+        self.figures[f'{model_name}_confusion_matrix'] = plt.gcf()
+        plt.close()
+
+    def plot_roc_curve(
+        self,
+        model_names: List[str] = None,
+        save_path: str = None,
+        figsize: Tuple[int, int] = (10, 8)
+    ) -> None:
+        """
+        绘制ROC曲线
+
+        Args:
+            model_names: 要绘制的模型列表，None表示全部
+            save_path: 图片保存路径
+            figsize: 图片大小
+        """
+        if model_names is None:
+            model_names = list(self.results.keys())
+
+        plt.figure(figsize=figsize)
+
+        # 绘制各模型ROC曲线
+        colors = plt.cm.Set1(np.linspace(0, 1, len(model_names)))
+        for model_name, color in zip(model_names, colors):
+            if model_name not in self.results:
+                continue
+
+            metrics = self.results[model_name]
+            fpr = metrics['fpr']
+            tpr = metrics['tpr']
+            auc_score = metrics['auc_roc']
+
+            plt.plot(fpr, tpr, color=color, lw=2,
+                     label=f'{model_name} (AUC = {auc_score:.4f})')
+
+        # 绘制对角线
+        plt.plot([0, 1], [0, 1], 'k--', lw=2, label='随机猜测')
+
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('假阳性率 (FPR)', fontsize=12)
+        plt.ylabel('真阳性率 (TPR)', fontsize=12)
+        plt.title('ROC曲线对比', fontsize=14)
+        plt.legend(loc='lower right', fontsize=10)
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        if save_path:
+            save_dir = os.path.dirname(save_path)
+            if save_dir:
+                os.makedirs(save_dir, exist_ok=True)
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"ROC曲线已保存至: {save_path}")
+
+        self.figures['roc_curve'] = plt.gcf()
+        plt.close()
+
+    def plot_pr_curve(
+        self,
+        model_names: List[str] = None,
+        save_path: str = None,
+        figsize: Tuple[int, int] = (10, 8)
+    ) -> None:
+        """
+        绘制PR曲线（精确率-召回率曲线）
+
+        Args:
+            model_names: 要绘制的模型列表，None表示全部
+            save_path: 图片保存路径
+            figsize: 图片大小
+        """
+        if model_names is None:
+            model_names = list(self.results.keys())
+
+        plt.figure(figsize=figsize)
+
+        # 绘制各模型PR曲线
+        colors = plt.cm.Set1(np.linspace(0, 1, len(model_names)))
+        for model_name, color in zip(model_names, colors):
+            if model_name not in self.results:
+                continue
+
+            metrics = self.results[model_name]
+            precision = metrics['precision_curve']
+            recall = metrics['recall_curve']
+            ap_score = metrics['auc_pr']
+
+            plt.plot(recall, precision, color=color, lw=2,
+                     label=f'{model_name} (AP = {ap_score:.4f})')
+
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('召回率 (Recall)', fontsize=12)
+        plt.ylabel('精确率 (Precision)', fontsize=12)
+        plt.title('PR曲线对比', fontsize=14)
+        plt.legend(loc='lower left', fontsize=10)
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        if save_path:
+            save_dir = os.path.dirname(save_path)
+            if save_dir:
+                os.makedirs(save_dir, exist_ok=True)
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"PR曲线已保存至: {save_path}")
+
+        self.figures['pr_curve'] = plt.gcf()
+        plt.close()
+
+    def plot_all_curves(
+        self,
+        model_name: str,
+        y_test: np.ndarray,
+        save_dir: str = None,
+        figsize: Tuple[int, int] = (15, 5)
+    ) -> None:
+        """
+        绘制所有评估曲线（混淆矩阵、ROC、PR）
+
+        Args:
+            model_name: 模型名称
+            y_test: 测试标签
+            save_dir: 保存目录
+            figsize: 图片大小
+        """
+        if model_name not in self.results:
+            raise ValueError(f"模型 {model_name} 未评估")
+
+        fig, axes = plt.subplots(1, 3, figsize=figsize)
+        metrics = self.results[model_name]
+
+        # 图1: 混淆矩阵
+        ax1 = axes[0]
+        cm = np.array([[metrics['tn'], metrics['fp']],
+                       [metrics['fn'], metrics['tp']]])
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax1,
+                    xticklabels=['正常', '钓鱼'],
+                    yticklabels=['正常', '钓鱼'],
+                    annot_kws={'size': 12})
+        ax1.set_xlabel('预测标签')
+        ax1.set_ylabel('真实标签')
+        ax1.set_title('混淆矩阵')
+
+        # 图2: ROC曲线
+        ax2 = axes[1]
+        fpr = metrics['fpr']
+        tpr = metrics['tpr']
+        auc_score = metrics['auc_roc']
+        ax2.plot(fpr, tpr, 'b-', lw=2, label=f'AUC = {auc_score:.4f}')
+        ax2.plot([0, 1], [0, 1], 'k--', lw=1)
+        ax2.set_xlim([0.0, 1.0])
+        ax2.set_ylim([0.0, 1.05])
+        ax2.set_xlabel('假阳性率 (FPR)')
+        ax2.set_ylabel('真阳性率 (TPR)')
+        ax2.set_title('ROC曲线')
+        ax2.legend(loc='lower right')
+        ax2.grid(True, alpha=0.3)
+
+        # 图3: PR曲线
+        ax3 = axes[2]
+        precision = metrics['precision_curve']
+        recall = metrics['recall_curve']
+        ap_score = metrics['auc_pr']
+        ax3.plot(recall, precision, 'b-', lw=2, label=f'AP = {ap_score:.4f}')
+        ax3.set_xlim([0.0, 1.0])
+        ax3.set_ylim([0.0, 1.05])
+        ax3.set_xlabel('召回率 (Recall)')
+        ax3.set_ylabel('精确率 (Precision)')
+        ax3.set_title('PR曲线')
+        ax3.legend(loc='lower left')
+        ax3.grid(True, alpha=0.3)
+
+        plt.suptitle(f'{model_name} 性能评估', fontsize=14, y=1.02)
+        plt.tight_layout()
+
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = os.path.join(save_dir, f'{model_name}_evaluation.png')
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"评估图表已保存至: {save_path}")
+
+        self.figures[f'{model_name}_all_curves'] = fig
+        plt.close()
+
+    def plot_metrics_comparison(
+        self,
+        model_names: List[str] = None,
+        metrics_to_plot: List[str] = None,
+        save_path: str = None,
+        figsize: Tuple[int, int] = (12, 6)
+    ) -> None:
+        """
+        绘制多模型指标对比图
+
+        Args:
+            model_names: 模型名称列表
+            metrics_to_plot: 要绘制的指标列表
+            save_path: 保存路径
+            figsize: 图片大小
+        """
+        if model_names is None:
+            model_names = list(self.results.keys())
+
+        if metrics_to_plot is None:
+            metrics_to_plot = ['accuracy', 'precision', 'recall', 'f1', 'auc_roc', 'auc_pr']
+
+        # 准备数据
+        data = []
+        for model_name in model_names:
+            if model_name in self.results:
+                for metric in metrics_to_plot:
+                    if metric in self.results[model_name]:
+                        data.append({
+                            'model': model_name,
+                            'metric': metric,
+                            'value': self.results[model_name][metric]
+                        })
+
+        df = pd.DataFrame(data)
+
+        # 绘图
+        plt.figure(figsize=figsize)
+        x = np.arange(len(metrics_to_plot))
+        width = 0.8 / len(model_names)
+
+        colors = plt.cm.Set2(np.linspace(0, 1, len(model_names)))
+        for i, model_name in enumerate(model_names):
+            model_data = df[df['model'] == model_name]
+            values = [model_data[model_data['metric'] == m]['value'].values[0]
+                      if len(model_data[model_data['metric'] == m]) > 0 else 0
+                      for m in metrics_to_plot]
+            offset = (i - len(model_names) / 2 + 0.5) * width
+            bars = plt.bar(x + offset, values, width, label=model_name, color=colors[i])
+
+            # 添加数值标签
+            for bar, val in zip(bars, values):
+                plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
+                         f'{val:.3f}', ha='center', va='bottom', fontsize=8, rotation=45)
+
+        plt.xlabel('评估指标', fontsize=12)
+        plt.ylabel('分数', fontsize=12)
+        plt.title('模型性能指标对比', fontsize=14)
+        plt.xticks(x, [self._get_metric_name(m) for m in metrics_to_plot], rotation=45, ha='right')
+        plt.legend(loc='upper right')
+        plt.ylim(0, 1.15)
+        plt.grid(axis='y', alpha=0.3)
+        plt.tight_layout()
+
+        if save_path:
+            save_dir = os.path.dirname(save_path)
+            if save_dir:
+                os.makedirs(save_dir, exist_ok=True)
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"指标对比图已保存至: {save_path}")
+
+        self.figures['metrics_comparison'] = plt.gcf()
+        plt.close()
+
+    def _get_metric_name(self, metric: str) -> str:
+        """获取指标中文名称"""
+        names = {
+            'accuracy': '准确率',
+            'precision': '精确率',
+            'recall': '召回率',
+            'f1': 'F1分数',
+            'specificity': '特异度',
+            'mcc': 'MCC',
+            'auc_roc': 'AUC-ROC',
+            'auc_pr': 'AUC-PR'
+        }
+        return names.get(metric, metric)
+
+    def get_detailed_metrics(self, model_name: str = None) -> pd.DataFrame:
+        """
+        获取详细评估指标
+
+        Args:
+            model_name: 模型名称，None表示全部
+
+        Returns:
+            DataFrame: 详细指标表格
+        """
+        if model_name is not None:
+            if model_name not in self.results:
+                raise ValueError(f"模型 {model_name} 未评估")
+            models = [model_name]
+        else:
+            models = list(self.results.keys())
+
+        rows = []
+        for name in models:
+            metrics = self.results[name]
+            row = {
+                '模型': name,
+                '准确率': f"{metrics['accuracy']:.4f}",
+                '精确率': f"{metrics['precision']:.4f}",
+                '召回率': f"{metrics['recall']:.4f}",
+                'F1分数': f"{metrics['f1']:.4f}",
+                '特异度': f"{metrics['specificity']:.4f}",
+                'MCC': f"{metrics['mcc']:.4f}",
+                'AUC-ROC': f"{metrics['auc_roc']:.4f}",
+                'AUC-PR': f"{metrics['auc_pr']:.4f}",
+                'TP': metrics['tp'],
+                'TN': metrics['tn'],
+                'FP': metrics['fp'],
+                'FN': metrics['fn']
+            }
+            rows.append(row)
+
+        return pd.DataFrame(rows)
+
+    def generate_report(
+        self,
+        save_path: str = None,
+        include_figures: bool = True
+    ) -> str:
+        """
+        生成评估报告
+
+        Args:
+            save_path: 报告保存路径
+            include_figures: 是否包含图表信息
+
+        Returns:
+            str: 报告内容
+        """
+        report_lines = []
+        report_lines.append("=" * 70)
+        report_lines.append("模型性能评估报告")
+        report_lines.append(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        report_lines.append("=" * 70)
+
+        # 模型汇总
+        report_lines.append("\n1. 模型性能汇总")
+        report_lines.append("-" * 50)
+
+        df = self.get_detailed_metrics()
+        report_lines.append(df.to_string(index=False))
+
+        # 详细结果
+        report_lines.append("\n\n2. 详细评估结果")
+        report_lines.append("-" * 50)
+
+        for model_name, metrics in self.results.items():
+            report_lines.append(f"\n{model_name}:")
+            report_lines.append(f"  - 准确率: {metrics['accuracy']:.4f}")
+            report_lines.append(f"  - 精确率: {metrics['precision']:.4f}")
+            report_lines.append(f"  - 召回率: {metrics['recall']:.4f}")
+            report_lines.append(f"  - F1分数: {metrics['f1']:.4f}")
+            report_lines.append(f"  - 特异度: {metrics['specificity']:.4f}")
+            report_lines.append(f"  - MCC: {metrics['mcc']:.4f}")
+            report_lines.append(f"  - AUC-ROC: {metrics['auc_roc']:.4f}")
+            report_lines.append(f"  - AUC-PR: {metrics['auc_pr']:.4f}")
+            report_lines.append(f"  - 混淆矩阵: TP={metrics['tp']}, TN={metrics['tn']}, FP={metrics['fp']}, FN={metrics['fn']}")
+
+        # 最佳模型
+        report_lines.append("\n\n3. 最佳模型分析")
+        report_lines.append("-" * 50)
+
+        best_acc_model = max(self.results.keys(), key=lambda x: self.results[x]['accuracy'])
+        best_auc_model = max(self.results.keys(), key=lambda x: self.results[x]['auc_roc'])
+        best_f1_model = max(self.results.keys(), key=lambda x: self.results[x]['f1'])
+
+        report_lines.append(f"  最高准确率: {best_acc_model} ({self.results[best_acc_model]['accuracy']:.4f})")
+        report_lines.append(f"  最高AUC-ROC: {best_auc_model} ({self.results[best_auc_model]['auc_roc']:.4f})")
+        report_lines.append(f"  最高F1分数: {best_f1_model} ({self.results[best_f1_model]['f1']:.4f})")
+
+        # 目标验证
+        report_lines.append("\n\n4. 目标验证")
+        report_lines.append("-" * 50)
+
+        best_acc = self.results[best_acc_model]['accuracy']
+        best_auc = self.results[best_auc_model]['auc_roc']
+
+        if best_acc >= 0.90:
+            report_lines.append(f"  [PASS] 准确率目标: {best_acc:.4f} >= 90%")
+        else:
+            report_lines.append(f"  [FAIL] 准确率目标: {best_acc:.4f} < 90%")
+
+        if best_auc >= 0.95:
+            report_lines.append(f"  [PASS] AUC-ROC目标: {best_auc:.4f} >= 95%")
+        else:
+            report_lines.append(f"  [WARN] AUC-ROC目标: {best_auc:.4f} < 95%")
+
+        if include_figures:
+            report_lines.append("\n\n5. 生成的图表")
+            report_lines.append("-" * 50)
+            for fig_name in self.figures.keys():
+                report_lines.append(f"  - {fig_name}")
+
+        report_lines.append("\n" + "=" * 70)
+        report_lines.append("报告结束")
+        report_lines.append("=" * 70)
+
+        report = "\n".join(report_lines)
+
+        if save_path:
+            save_dir = os.path.dirname(save_path)
+            if save_dir:
+                os.makedirs(save_dir, exist_ok=True)
+            with open(save_path, 'w', encoding='utf-8') as f:
+                f.write(report)
+            print(f"评估报告已保存至: {save_path}")
+
+        return report
+
+    def compare_models(
+        self,
+        metric: str = 'accuracy',
+        ascending: bool = False
+    ) -> pd.DataFrame:
+        """
+        按指定指标比较模型
+
+        Args:
+            metric: 比较指标
+            ascending: 是否升序排列
+
+        Returns:
+            DataFrame: 排序后的模型比较结果
+        """
+        if not self.results:
+            raise ValueError("没有评估结果可比较")
+
+        data = []
+        for model_name, metrics in self.results.items():
+            data.append({
+                '模型': model_name,
+                metric: metrics.get(metric, 0)
+            })
+
+        df = pd.DataFrame(data)
+        df = df.sort_values(metric, ascending=ascending)
+
+        return df
+
+    def save_results(self, filepath: str) -> None:
+        """
+        保存评估结果到文件
+
+        Args:
+            filepath: 保存路径（.json文件）
+        """
+        # 准备可序列化的结果
+        serializable_results = {}
+        for model_name, metrics in self.results.items():
+            serializable_results[model_name] = {
+                k: v.tolist() if isinstance(v, np.ndarray) else v
+                for k, v in metrics.items()
+            }
+
+        save_dir = os.path.dirname(filepath)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(serializable_results, f, indent=2, ensure_ascii=False)
+
+        print(f"评估结果已保存至: {filepath}")
+
+    def load_results(self, filepath: str) -> None:
+        """
+        从文件加载评估结果
+
+        Args:
+            filepath: 结果文件路径
+        """
+        with open(filepath, 'r', encoding='utf-8') as f:
+            self.results = json.load(f)
+
+        # 转换回numpy数组
+        for model_name in self.results:
+            for key in ['fpr', 'tpr', 'roc_thresholds', 'precision_curve', 'recall_curve', 'pr_thresholds']:
+                if key in self.results[model_name]:
+                    self.results[model_name][key] = np.array(self.results[model_name][key])
+
+        print(f"评估结果已从 {filepath} 加载")
+
+
+# ==================== Day 19: 评估便捷函数 ====================
+
+def evaluate_all_models(
+    trainers: List[BaseModelTrainer],
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    save_dir: str = None
+) -> Tuple[ModelEvaluator, pd.DataFrame]:
+    """
+    评估所有模型
+
+    Args:
+        trainers: 训练器列表
+        X_test: 测试特征
+        y_test: 测试标签
+        save_dir: 图表保存目录
+
+    Returns:
+        (evaluator, summary_df)
+    """
+    evaluator = ModelEvaluator()
+
+    print("=" * 60)
+    print("全面模型性能评估")
+    print("=" * 60)
+
+    # 评估各模型
+    for trainer in trainers:
+        if hasattr(trainer, 'model') and trainer.model is not None:
+            evaluator.evaluate_model(trainer.model, X_test, y_test, trainer.model_name)
+
+    # 获取汇总
+    summary_df = evaluator.get_detailed_metrics()
+
+    print("\n" + "=" * 60)
+    print("评估汇总")
+    print("=" * 60)
+    print(summary_df.to_string(index=False))
+
+    # 保存图表
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+
+        # ROC曲线
+        evaluator.plot_roc_curve(save_path=os.path.join(save_dir, 'roc_curves.png'))
+
+        # PR曲线
+        evaluator.plot_pr_curve(save_path=os.path.join(save_dir, 'pr_curves.png'))
+
+        # 指标对比
+        evaluator.plot_metrics_comparison(save_path=os.path.join(save_dir, 'metrics_comparison.png'))
+
+        # 各模型混淆矩阵
+        for trainer in trainers:
+            if trainer.model_name in evaluator.results:
+                evaluator.plot_confusion_matrix(
+                    trainer.model_name,
+                    save_path=os.path.join(save_dir, f'{trainer.model_name}_confusion_matrix.png')
+                )
+
+    return evaluator, summary_df
+
+
+def generate_final_report(
+    evaluator: ModelEvaluator,
+    save_dir: str,
+    train_info: Dict = None
+) -> str:
+    """
+    生成最终评估报告
+
+    Args:
+        evaluator: 评估器
+        save_dir: 保存目录
+        train_info: 训练信息（可选）
+
+    Returns:
+        str: 报告路径
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    # 生成报告
+    report = evaluator.generate_report()
+
+    # 保存报告
+    report_path = os.path.join(save_dir, 'evaluation_report.txt')
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write(report)
+
+    # 保存评估结果
+    results_path = os.path.join(save_dir, 'evaluation_results.json')
+    evaluator.save_results(results_path)
+
+    # 保存指标表格
+    metrics_path = os.path.join(save_dir, 'evaluation_metrics.csv')
+    evaluator.get_detailed_metrics().to_csv(metrics_path, index=False, encoding='utf-8-sig')
+
+    print(f"\n最终报告已生成:")
+    print(f"  - 评估报告: {report_path}")
+    print(f"  - 评估结果: {results_path}")
+    print(f"  - 指标表格: {metrics_path}")
+
+    return report_path
 
 
 if __name__ == "__main__":
